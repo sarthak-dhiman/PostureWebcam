@@ -4,3 +4,7 @@ venv310/
 data/
 __pycache__/
 *.log
+
+live_frame.jpg
+live_stats.json
+posture.db

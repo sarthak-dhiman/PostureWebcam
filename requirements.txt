@@ -1,0 +1,10 @@
+mediapipe
+opencv-python
+face_recognition_models
+dlib-bin
+pystray
+Pillow
+plyer
+PyQt6
+matplotlib
+plotly
