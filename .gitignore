@@ -1,0 +1,6 @@
+# Large environment files
+.env
+venv310/
+data/
+__pycache__/
+*.log
