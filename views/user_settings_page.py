@@ -54,11 +54,7 @@ class UserSettingsPage(QWidget):
         lay.addWidget(self._display_name)
         lay.addSpacing(8)
 
-        # Email (readonly)
-        self._email_field = QLineEdit()
-        self._email_field.setPlaceholderText("Email address")
-        self._email_field.setReadOnly(True)
-        lay.addWidget(self._email_field)
+        # Small gap before actions
         lay.addSpacing(18)
 
         # Primary action — continue without an org
@@ -86,7 +82,7 @@ class UserSettingsPage(QWidget):
         outer.addStretch()
 
     def set_user(self, email: str | None, display_name: str | None = None):
-        if email:
-            self._email_field.setText(email)
+        # For solo onboarding we don't ask for or show the email address;
+        # only set the display name if provided.
         if display_name:
             self._display_name.setText(display_name)

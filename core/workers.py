@@ -7,15 +7,15 @@ Every request runs off the main thread so the UI never freezes.
 import time
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer, QObject
 
 from core.constants import (
-    LOGIN_MOCK_DELAY_S,
     SUBSCRIPTION_CHECK_INTERVAL_MS,
     API_VERIFY,
     API_LOGIN,
+    API_GOOGLE_OAUTH,
     API_GOOGLE_POLL,
 )
 
@@ -59,6 +59,15 @@ def _write_local_auth(payload: dict) -> None:
         json.dump(payload, f)
 
 
+def _clear_local_auth() -> None:
+    """Delete the auth cache so the next launch shows the login page."""
+    try:
+        if os.path.exists(_AUTH_CACHE):
+            os.remove(_AUTH_CACHE)
+    except Exception:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  LoginWorker
 # ─────────────────────────────────────────────────────────────────────────────
@@ -82,10 +91,6 @@ class LoginWorker(QThread):
 
     def run(self):
         try:
-            # ── Mock network latency ────────────────────────────────
-            time.sleep(LOGIN_MOCK_DELAY_S)
-
-            # ── Mock validation ─────────────────────────────────────
             if not self._email or "@" not in self._email:
                 self.login_failed.emit("Please enter a valid email address.")
                 return
@@ -93,7 +98,6 @@ class LoginWorker(QThread):
                 self.login_failed.emit("Password must be at least 4 characters.")
                 return
 
-            # First try calling the real API_LOGIN endpoint (local mock server)
             import urllib.request
             import urllib.error
 
@@ -104,57 +108,31 @@ class LoginWorker(QThread):
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     if resp.status in (200, 201):
                         body = json.load(resp)
-                        # expect token, expires_at, email, name, plan
                         user = {
                             "email": body.get("email", self._email),
                             "name": body.get("name", self._email.split("@")[0].title()),
-                            "plan": body.get("plan", "Enterprise"),
+                            "plan": body.get("plan", "—"),
                             "first_time": body.get("first_time", False),
-                            "token": body.get("token", "mock-jwt-token"),
-                            "expires_at": body.get("expires_at", (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()),
-                            # Store subscription so auto-start gate works
-                            "subscription": body.get("subscription") or {"status": "active"},
+                            "token": body.get("token"),
+                            "expires_at": body.get("expires_at"),
+                            "subscription": body.get("subscription") or {},
                         }
                         _write_local_jwt_expiry(user["expires_at"])
                         _write_local_auth(user)
                         self.login_success.emit(user)
-                        return
-            except urllib.error.URLError:
-                # network issue — fall back to local mock behavior
-                pass
-
-            # ── Fallback local/mock behavior (same as before)
-            expiry = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
-            _write_local_jwt_expiry(expiry)
-
-            # If a previous auth cache exists for this email, treat as not first_time
-            prev = _read_local_auth()
-            first_time = True
-            if prev and prev.get("email") == self._email:
-                first_time = False
-
-            # Support a simple demo credential for testing
-            if self._email == "demo@local" and self._password == "demo1234":
-                # demo user
-                token = "demo-mock-token"
-                plan = "Enterprise"
-            else:
-                token = "mock-jwt-token"
-                plan = "Enterprise"
-
-            user = {
-                "email": self._email,
-                "name": self._email.split("@")[0].title(),
-                "plan": plan,
-                "first_time": first_time,
-                "token": token,
-                "expires_at": expiry,
-                "subscription": {"status": "active"},
-            }
-
-            # Persist auth so the app can auto-login until cache cleared
-            _write_local_auth(user)
-            self.login_success.emit(user)
+                    else:
+                        self.login_failed.emit(f"Login failed (HTTP {resp.status}).")
+            except urllib.error.HTTPError as e:
+                # Server responded with 4xx/5xx — do NOT fall back
+                try:
+                    body = json.load(e)
+                    msg = body.get("error") or body.get("message") or f"HTTP {e.code}"
+                except Exception:
+                    msg = f"HTTP {e.code}: {e.reason}"
+                self.login_failed.emit(msg)
+            except urllib.error.URLError as e:
+                # Genuine network failure (server down, DNS, timeout)
+                self.login_failed.emit("Cannot reach the server. Please check your connection.")
 
         except Exception as exc:
             self.login_failed.emit(f"Unexpected error: {exc}")
@@ -196,54 +174,78 @@ class SubscriptionMonitor(QThread):
                 elapsed += 500
 
     def _check(self):
-        """Attempt remote verification; fall back to local JWT cache."""
-        try:
-            # ── Try remote verify using real stored token ─────────────────
-            import urllib.request
-            _cached = _read_local_auth()
-            _stored_token = (_cached or {}).get("token") or "mock-jwt-token"
+        """Verify subscription against the backend. No local fallback."""
+        import urllib.request
+        import urllib.error
 
+        _cached = _read_local_auth()
+        _stored_token = (_cached or {}).get("token")
+
+        if not _stored_token:
+            self.status_changed.emit("expired", "Not logged in.")
+            return
+
+        try:
             req = urllib.request.Request(API_VERIFY, method="GET")
             req.add_header("Authorization", f"Bearer {_stored_token}")
             with urllib.request.urlopen(req, timeout=5) as resp:
-                # If we somehow reach a real server, treat 200 as valid
                 if resp.status == 200:
-                    self.status_changed.emit(
-                        "online",
-                        "Subscription active — verified online.",
-                    )
-                    return
-
-        except Exception:
-            # Network unreachable / DNS failure / timeout — expected for
-            # the mock URL.  Fall through to local JWT check.
-            pass
-
-        # ── Offline fallback – inspect local JWT expiry ─────────────
-        expiry_str = _read_local_jwt_expiry()
-        if expiry_str:
-            try:
-                expiry_dt = datetime.fromisoformat(expiry_str)
-                now = datetime.now(timezone.utc)
-                if expiry_dt > now:
-                    days_left = (expiry_dt - now).days
-                    self.status_changed.emit(
-                        "offline",
-                        f"Offline mode — licence valid for {days_left} day(s).",
-                    )
-                    return
+                    self.status_changed.emit("online", "Subscription active — verified online.")
                 else:
-                    self.status_changed.emit(
-                        "expired",
-                        "Subscription expired. Please reconnect to renew.",
-                    )
+                    self.status_changed.emit("expired", f"Subscription check failed (HTTP {resp.status}).")
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                self.status_changed.emit("expired", "Session expired. Please log in again.")
+            else:
+                self.status_changed.emit("expired", f"Subscription check failed (HTTP {e.code}).")
+        except urllib.error.URLError:
+            self.status_changed.emit("offline", "Cannot reach server — working offline.")
+        except Exception as exc:
+            self.status_changed.emit("offline", f"Subscription check error: {exc}")
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  OAuthInitWorker
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class OAuthInitWorker(QThread):
+    """Background thread that requests the OAuth provider URL from the backend.
+
+    Signals
+    -------
+    init_success(str, str)  – (provider_url, session_id) on success
+    init_failed(str)        – error message on failure
+    """
+
+    init_success = pyqtSignal(str, str)
+    init_failed  = pyqtSignal(str)
+
+    def run(self):
+        import urllib.request
+        import urllib.error
+        try:
+            req = urllib.request.Request(API_GOOGLE_OAUTH, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = json.load(resp)
+                url     = body.get("url")
+                session = body.get("session")
+                if not url or not session:
+                    self.init_failed.emit("Invalid OAuth response from server.")
                     return
+                self.init_success.emit(url, session)
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.load(e)
+                msg = body.get("error") or body.get("message") or f"HTTP {e.code}"
             except Exception:
-                pass
-
-        # No cache at all — treat as offline so tracker keeps running
-        self.status_changed.emit("offline", "No licence cache — running in offline mode.")
-
+                msg = f"HTTP {e.code}: {e.reason}"
+            self.init_failed.emit(f"Failed to start OAuth: {msg}")
+        except urllib.error.URLError:
+            self.init_failed.emit("Cannot reach the server. Please check your connection.")
+        except Exception as exc:
+            self.init_failed.emit(f"Unexpected error: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -351,6 +353,7 @@ class PostureTrackerThread(QThread):
     # ------------------------------------------------------------------
     def _kill_daemon(self):
         """Terminate tracker_daemon.py subprocess if it is running."""
+        _pid_file = str(self._base / "data" / "tracker_daemon.pid")
         proc = self._daemon_proc
         if proc is not None and proc.poll() is None:
             try:
@@ -362,22 +365,79 @@ class PostureTrackerThread(QThread):
                 except Exception:
                     pass
         self._daemon_proc = None
+        # Remove PID file so the next spawn does not try to kill a stale PID
+        try:
+            if os.path.exists(_pid_file):
+                os.remove(_pid_file)
+        except Exception:
+            pass
 
     def _spawn_daemon(self):
-        """Start tracker_daemon.py as a detached subprocess."""
+        """Start tracker_daemon.py as a detached subprocess (no console window)."""
         if not self._spawn_daemon_enabled:
             return
         import subprocess, sys
         if self._daemon_proc is not None and self._daemon_proc.poll() is None:
             return  # already running
         daemon_script = str(self._base / "tracker_daemon.py")
+        _pid_file = str(self._base / "data" / "tracker_daemon.pid")
+
+        # Kill any orphaned daemon process left over from a previous session
         try:
-            self._daemon_proc = subprocess.Popen(
+            if os.path.exists(_pid_file):
+                with open(_pid_file, "r", encoding="utf-8") as _pf:
+                    _old_pid = int(_pf.read().strip())
+                try:
+                    if sys.platform == "win32":
+                        import ctypes
+                        _hnd = ctypes.windll.kernel32.OpenProcess(1, False, _old_pid)
+                        if _hnd:
+                            ctypes.windll.kernel32.TerminateProcess(_hnd, 1)
+                            ctypes.windll.kernel32.CloseHandle(_hnd)
+                    else:
+                        os.kill(_old_pid, 9)
+                except Exception:
+                    pass
+                try:
+                    os.remove(_pid_file)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # On Windows hide the console window so no black Python terminal pops up
+        _popen_kwargs: dict = {"cwd": str(self._base)}
+        if sys.platform == "win32":
+            _popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        try:
+            proc = subprocess.Popen(
                 [sys.executable, daemon_script, "--no-tray"],
-                cwd=str(self._base),
+                **_popen_kwargs,
             )
+            self._daemon_proc = proc
+            # Persist PID so it can be killed if the app exits unexpectedly
+            try:
+                os.makedirs(os.path.dirname(_pid_file), exist_ok=True)
+                with open(_pid_file, "w", encoding="utf-8") as _pf:
+                    _pf.write(str(proc.pid))
+            except Exception:
+                pass
         except Exception as e:
             print(f"[PostureTrackerThread] Failed to spawn tracker_daemon: {e}")
+
+    def ensure_daemon_running(self) -> None:
+        """Public helper to ensure the tracker daemon subprocess is running.
+
+        This will start the daemon if `spawn_daemon` is enabled and no daemon
+        process is currently active. It does not change the tracker's hold
+        state or begin capturing; it merely ensures the background daemon is
+        alive so the dashboard can read live stats immediately.
+        """
+        try:
+            self._spawn_daemon()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
 

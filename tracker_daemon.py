@@ -78,6 +78,10 @@ except ImportError:
         pass
     class QGraphicsDropShadowEffect:
         pass
+try:
+    from core.constants import APP_NAME
+except Exception:
+    APP_NAME = "Posture Tracker"
     class QSystemTrayIcon:
         pass
 
@@ -129,6 +133,9 @@ import database
 
 # Load configuration from file
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "app_config.json")
+_AUTH_CACHE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "auth_cache.json")
+# App icon used in system notifications
+_APP_ICON    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "office.png")
 
 def load_config():
     """Load app configuration, return defaults if file doesn't exist."""
@@ -144,6 +151,18 @@ def load_config():
 
 # Global config object
 _config = load_config()
+
+
+def _user_signed_in() -> bool:
+    """Return True if an auth cache with a token exists (simple check)."""
+    try:
+        if not os.path.exists(_AUTH_CACHE):
+            return False
+        with open(_AUTH_CACHE, 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+        return bool(data.get('token'))
+    except Exception:
+        return False
 
 def reload_config():
     """Reload configuration from file."""
@@ -322,7 +341,7 @@ if PYQT6_AVAILABLE:
             self._updater.check_status()
             
             # Enable tooltips
-            self.setToolTip("Posture Tracker - Checking...")
+            self.setToolTip(f"{APP_NAME} - Checking...")
         
         def _create_menu(self):
             """Create simple context menu."""
@@ -778,14 +797,17 @@ def _notify_camera_busy() -> None:
     """Alert: another app has grabbed the camera — tracking paused."""
     if not _config.get("notifications_enabled", True):
         return
+    if not _user_signed_in():
+        return
     try:
-        notification.notify(
+            notification.notify(
             title="Camera In Use — Tracking Paused",
             message=(
                 "Another application has taken over the camera.\n"
                 "Posture tracking will automatically resume once it is available again."
             ),
-            app_name="Posture Tracker",
+            app_name=APP_NAME,
+            app_icon=_APP_ICON,
             timeout=15,
         )
     except Exception as exc:
@@ -796,11 +818,14 @@ def _notify_camera_resumed() -> None:
     """Alert: camera is free again — tracking resumed."""
     if not _config.get("notifications_enabled", True):
         return
+    if not _user_signed_in():
+        return
     try:
         notification.notify(
             title="Camera Available — Tracking Resumed",
             message="The camera is free again. Posture tracking has resumed.",
-            app_name="Posture Tracker",
+            app_name=APP_NAME,
+            app_icon=_APP_ICON,
             timeout=10,
         )
     except Exception as exc:
@@ -811,12 +836,15 @@ def _notify_bad_posture():
     """General slouch alert."""
     if not _config.get("notifications_enabled", True):
         return
+    if not _user_signed_in():
+        return
     try:
         alert_msg = f"You've been slouching for {_config.get('alert_timing_seconds', 30)} seconds. Sit up straight!"
         notification.notify(
             title="Posture Alert",
             message=alert_msg,
-            app_name="Posture Tracker",
+            app_name=APP_NAME,
+            app_icon=_APP_ICON,
             timeout=10,
         )
     except Exception as exc:
@@ -825,11 +853,14 @@ def _notify_bad_posture():
 
 def _notify_take_break():
     """30-5 rule: take a movement break after 30 min of continuous sitting."""
+    if not _user_signed_in():
+        return
     try:
         notification.notify(
             title="Time to Move! (⏱ 30 min)",
             message="You've been sitting for 30 minutes. Stand up and move or stretch for at least 5 minutes.",
-            app_name="Posture Tracker",
+            app_name=APP_NAME,
+            app_icon=_APP_ICON,
             timeout=20,
         )
     except Exception as exc:
@@ -838,11 +869,14 @@ def _notify_take_break():
 
 def _notify_eye_break():
     """20-20-20 rule: rest eyes every 20 minutes."""
+    if not _user_signed_in():
+        return
     try:
         notification.notify(
             title="Eye Break — 20-20-20",
             message="Look at something 20 feet away for 20 seconds to reduce eye strain.",
-            app_name="Posture Tracker",
+            app_name=APP_NAME,
+            app_icon=_APP_ICON,
             timeout=15,
         )
     except Exception as exc:
@@ -851,11 +885,14 @@ def _notify_eye_break():
 
 def _notify_chin_forward():
     """Chin / forward-head protrusion alert."""
+    if not _user_signed_in():
+        return
     try:
         notification.notify(
             title="Head Posture Alert",
             message="Tuck your chin in slightly — your head is protruding forward.",
-            app_name="Posture Tracker",
+            app_name=APP_NAME,
+            app_icon=_APP_ICON,
             timeout=10,
         )
     except Exception as exc:
@@ -865,6 +902,8 @@ def _notify_chin_forward():
 def _notify_head_tilt(deg: float) -> None:
     """Lateral head tilt alert — head dropped to one side."""
     side = "left" if deg > 0 else "right"   # positive = right ear lower
+    if not _user_signed_in():
+        return
     try:
         notification.notify(
             title="Head Tilt Detected",
@@ -872,7 +911,8 @@ def _notify_head_tilt(deg: float) -> None:
                 f"Your head is tilted ~{abs(deg):.0f}° to the {side}. "
                 "Level your head and relax your neck muscles."
             ),
-            app_name="Posture Tracker",
+            app_name=APP_NAME,
+            app_icon=_APP_ICON,
             timeout=10,
         )
     except Exception as exc:
@@ -881,6 +921,8 @@ def _notify_head_tilt(deg: float) -> None:
 
 def _notify_lean_back() -> None:
     """Torso recline alert — leaning back too far in the chair."""
+    if not _user_signed_in():
+        return
     try:
         notification.notify(
             title="Posture Alert — Leaning Back",
@@ -888,7 +930,8 @@ def _notify_lean_back() -> None:
                 "You're reclining too far. Sit upright with your lower back "
                 "supported and your feet flat on the floor."
             ),
-            app_name="Posture Tracker",
+            app_name=APP_NAME,
+            app_icon=_APP_ICON,
             timeout=10,
         )
     except Exception as exc:
@@ -897,11 +940,14 @@ def _notify_lean_back() -> None:
 
 def _notify_shoulder_uneven():
     """One shoulder significantly closer to or lower than the other."""
+    if not _user_signed_in():
+        return
     try:
         notification.notify(
             title="Shoulder Alignment Alert",
             message="Your shoulders are uneven or rolled. Sit evenly and relax your shoulders down.",
-            app_name="Posture Tracker",
+            app_name=APP_NAME,
+            app_icon=_APP_ICON,
             timeout=10,
         )
     except Exception as exc:
@@ -910,6 +956,8 @@ def _notify_shoulder_uneven():
 
 def _notify_too_close(dist_cm: int, min_cm: int) -> None:
     """Alert when the user is sitting closer than the recommended minimum distance."""
+    if not _user_signed_in():
+        return
     try:
         notification.notify(
             title="Too Close to Screen!",
@@ -917,8 +965,9 @@ def _notify_too_close(dist_cm: int, min_cm: int) -> None:
                 "You are sitting too close to your screen.  "
                 "Move your chair back or push the monitor further away."
             ),
-            app_name="Posture Tracker",
-            timeout=12,
+            app_name=APP_NAME,
+            app_icon=_APP_ICON,
+            timeout=10,
         )
     except Exception as exc:
         log.error("Too-close notification failed: %s", exc)
@@ -926,6 +975,8 @@ def _notify_too_close(dist_cm: int, min_cm: int) -> None:
 
 def _notify_too_far(dist_cm: int, max_cm: int) -> None:
     """Alert when the user is sitting further than the recommended maximum distance."""
+    if not _user_signed_in():
+        return
     try:
         notification.notify(
             title="Too Far from Screen",
@@ -933,7 +984,8 @@ def _notify_too_far(dist_cm: int, max_cm: int) -> None:
                 "You are sitting too far from your screen.  "
                 "Lean in slightly or move your chair forward."
             ),
-            app_name="Posture Tracker",
+            app_name=APP_NAME,
+            app_icon=_APP_ICON,
             timeout=12,
         )
     except Exception as exc:
@@ -1140,14 +1192,14 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
     log.info("Tracking loop started.")
     try:
         notification.notify(
-            title="Posture Tracker Started",
+            title=f"{APP_NAME} Started",
             message=(
                 f"Screen detected: {_screen_info['diagonal_inches']:.1f}\" "
                 f"({_screen_info['width_px']}×{_screen_info['height_px']})\n"
                 f"Sit {_screen_info['recommended_min_cm']}–{_screen_info['recommended_max_cm']} cm "
                 "from your screen for healthy viewing distance."
             ),
-            app_name="Posture Tracker",
+            app_name=APP_NAME,
             timeout=12,
         )
     except Exception as exc:

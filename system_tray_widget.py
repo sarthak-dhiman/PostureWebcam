@@ -17,6 +17,7 @@ from PyQt6.QtCore import QTimer, pyqtSignal, QObject, Qt
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QFont, QBrush
 from core.icons import icon
 from core.workers import SubscriptionMonitor, PostureTrackerThread
+from core.constants import APP_NAME
 
 # Import live stats path
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -70,6 +71,20 @@ class PostureStatusUpdater(QObject):
 
 def create_enhanced_status_icon(status: str, size: int = 32) -> QIcon:
     """Create an enhanced QIcon with better visual design."""
+    # For no_tracker / app idle state use the office.png app icon directly
+    if status == "no_tracker":
+        try:
+            _o = os.path.join(_APP_DIR, "office.png")
+            if os.path.isfile(_o):
+                _pm = QPixmap(_o).scaled(
+                    size, size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                if not _pm.isNull():
+                    return QIcon(_pm)
+        except Exception:
+            pass
     # Prefer an SVG asset named after the status if available.
     try:
         from core.icons import icon as _svg_icon
@@ -148,16 +163,35 @@ class EnhancedTrayIcon(QSystemTrayIcon):
     def __init__(self, parent=None):
         super().__init__(parent)
         
-        # Subscription monitor — controls whether the tracker should run
-        self._sub_monitor = SubscriptionMonitor()
-        self._sub_monitor.status_changed.connect(self._on_subscription_status)
-        self._sub_monitor.start()
+        # Subscription monitor — prefer reusing the app's monitor to avoid
+        # duplicate background threads emitting conflicting hold signals.
+        try:
+            win = self._find_main_window()
+            # Reuse the app's monitor if available; do NOT start a separate monitor
+            # while the user is signed out — subscription checks should start
+            # when the main app starts monitoring after login.
+            if win is not None and hasattr(win, "_sub_monitor") and win._sub_monitor is not None:
+                self._sub_monitor = win._sub_monitor
+                self._sub_monitor.status_changed.connect(self._on_subscription_status)
+            else:
+                # No app monitor available; avoid starting a background monitor
+                self._sub_monitor = None
+        except Exception:
+            self._sub_monitor = None
 
-        # Posture tracker thread — polling-only (daemon spawning handled by MainWindow)
-        self._tracker = PostureTrackerThread(poll_interval_ms=500, spawn_daemon=False)
-        self._tracker.posture_update.connect(self._on_tracker_update)
-        self._tracker.status_changed.connect(lambda s, d: self._on_status_changed(s, d, {}))
-        self._tracker.start()
+        # Posture tracker — reuse the main app's tracker if available; do not
+        # create a local tracker while signed out to avoid alerts and daemon
+        # activity. If the main window exposes a tracker, subscribe to its signals.
+        win = self._find_main_window()
+        if win is not None and hasattr(win, "_tracker") and win._tracker is not None:
+            self._tracker = win._tracker
+            try:
+                self._tracker.posture_update.connect(self._on_tracker_update)
+                self._tracker.status_changed.connect(lambda s, d: self._on_status_changed(s, d, {}))
+            except Exception:
+                pass
+        else:
+            self._tracker = None
 
         # Ensure clean shutdown when the QApplication quits
         app = QApplication.instance()
@@ -184,7 +218,20 @@ class EnhancedTrayIcon(QSystemTrayIcon):
         # Create context menu
         self._create_menu()
         
-        # Set initial icon
+        # Set initial icon to office.png so the tray is recognisable before
+        # the first posture-status update fires.
+        try:
+            _o = os.path.join(_APP_DIR, "office.png")
+            if os.path.isfile(_o):
+                self.setIcon(QIcon(QPixmap(_o).scaled(
+                    32, 32,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )))
+        except Exception:
+            pass
+        
+        # Set initial icon (colour-coded status)
         self._update_icon()
         
         # Show tray icon
@@ -192,9 +239,17 @@ class EnhancedTrayIcon(QSystemTrayIcon):
         
         # Initial status check
         self._updater.check_status()
-        
+        # If no user is logged in, show no-tracker state to avoid implying
+        # the tracker is running when the app is signed out.
+        win = self._find_main_window()
+        is_logged_in = bool(win and getattr(win, "_user", None))
+        if not is_logged_in:
+            self._current_status = "no_tracker"
+            self._current_stats = {}
+            self._update_icon()
+
         # Enable tooltips
-        self.setToolTip("Posture Tracker - Checking...")
+        self.setToolTip(f"{APP_NAME} - Checking...")
     
     def _create_menu(self):
         """Create enhanced context menu."""
@@ -348,18 +403,34 @@ class EnhancedTrayIcon(QSystemTrayIcon):
     def _on_subscription_status(self, status: str, detail: str):
         """Respond to subscription monitor changes by toggling the tracker."""
         # status values: online | offline | expired
+        # Only release the tracker when there is an authenticated user.
+        win = self._find_main_window()
+        is_logged_in = bool(win and getattr(win, "_user", None))
+
         if status == "expired":
-            # place tracker on hold until user logs in
             try:
-                self._tracker.set_hold(True)
+                if self._tracker is not None:
+                    self._tracker.set_hold(True)
             except Exception:
                 pass
-            # show a tray balloon to inform the user
+            # inform the user
             self.showMessage("Subscription", "Subscription expired — tracker paused.", QIcon(), 3000)
-        else:
-            # online/offline -> allow tracker to run
+        elif status == "online":
+            # Backend verifies subscription; only unhold if the app has a user session
             try:
-                self._tracker.set_hold(False)
+                if self._tracker is not None:
+                    if is_logged_in:
+                        self._tracker.set_hold(False)
+                    else:
+                        self._tracker.set_hold(True)
+            except Exception:
+                pass
+        else:  # offline
+            # When offline, keep tracker held if no user is logged in; otherwise preserve current session
+            try:
+                if self._tracker is not None:
+                    should_hold = not is_logged_in
+                    self._tracker.set_hold(should_hold)
             except Exception:
                 pass
     
@@ -448,8 +519,8 @@ def main():
         good_icon = QIcon(create_enhanced_status_icon("good"))
 
     tray_icon.showMessage(
-        "Posture Tracker",
-        "Posture monitoring started\\nRight-click the tray icon for options",
+        APP_NAME,
+        f"{APP_NAME} monitoring started\nRight-click the tray icon for options",
         good_icon,
         3000  # 3 seconds
     )

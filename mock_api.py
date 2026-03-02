@@ -2,7 +2,7 @@
 
 Run with: python mock_api.py
 
-Provides endpoints under /v1/auth and /v1/org that mirror the app's expected
+Provides endpoints under /api/v1/auth and /api/v1/org that mirror the app's expected
 contract. This is intentionally minimal and not secure — for local development
 only.
 """
@@ -48,7 +48,7 @@ def require_auth(fn):
     return wrapper
 
 
-@app.route("/v1/auth/login", methods=["POST"])
+@app.route("/api/v1/auth/login", methods=["POST"])
 def login():
     data = request.get_json(force=True)
     email = data.get("email")
@@ -99,7 +99,7 @@ def login():
     }), 201
 
 
-@app.route("/v1/auth/verify", methods=["GET"])
+@app.route("/api/v1/auth/verify", methods=["GET"])
 def verify():
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
@@ -116,18 +116,18 @@ def verify():
     return jsonify({"status": "ok", "expires_at": exp}), 200
 
 
-@app.route("/v1/auth/google", methods=["GET"])
+@app.route("/api/v1/auth/google", methods=["GET"])
 def google_oauth():
     # Create a short-lived OAuth session and return a local URL the user can open.
     import uuid
     session_id = str(uuid.uuid4())
     # The URL points to a local completion endpoint which simulates the provider
-    complete_url = f"http://127.0.0.1:8000/v1/auth/google/complete?session={session_id}"
+    complete_url = f"http://localhost:8000/api/v1/auth/google/complete?session={session_id}"
     OAUTH_SESSIONS[session_id] = {"status": "pending", "token": None, "expires": None}
     return jsonify({"url": complete_url, "session": session_id}), 200
 
 
-@app.route("/v1/auth/google/complete", methods=["GET"])
+@app.route("/api/v1/auth/google/complete", methods=["GET"])
 def google_complete():
     # Simulate the end-user completing OAuth in the browser: mark session done and create token
     session = request.args.get("session")
@@ -147,7 +147,7 @@ def google_complete():
     return f"<html><body><h2>OAuth complete</h2><p>You may now return to the application.</p></body></html>", 200
 
 
-@app.route("/v1/auth/google/poll", methods=["GET"])
+@app.route("/api/v1/auth/google/poll", methods=["GET"])
 def google_poll():
     session = request.args.get("session")
     if not session or session not in OAUTH_SESSIONS:
@@ -168,7 +168,7 @@ def google_poll():
     }), 200
 
 
-@app.route("/v1/auth/google/callback", methods=["GET"])
+@app.route("/api/v1/auth/google/callback", methods=["GET"])
 def google_callback():
     # Simulate exchange — accept ?code=... and return token
     code = request.args.get("code")
@@ -188,15 +188,15 @@ def google_callback():
     }), 200
 
 
-@app.route("/v1/auth/signup", methods=["GET"])
+@app.route("/api/v1/auth/signup", methods=["GET"])
 def signup_form():
     # Simple signup page for local dev — clicking the link will create a token.
     example_email = request.args.get("email", "newuser@local")
-    complete_url = f"http://127.0.0.1:8000/v1/auth/signup/complete?email={example_email}"
+    complete_url = f"http://localhost:8000/api/v1/auth/signup/complete?email={example_email}"
     return f"<html><body><h2>Sign up (mock)</h2><p>Click to complete signup for <b>{example_email}</b>:</p><p><a href=\"{complete_url}\">Complete signup</a></p></body></html>", 200
 
 
-@app.route("/v1/auth/signup/complete", methods=["GET"])
+@app.route("/api/v1/auth/signup/complete", methods=["GET"])
 def signup_complete():
     email = request.args.get("email") or "newuser@local"
     token, expires = make_token(email)
@@ -212,7 +212,7 @@ def signup_complete():
     }), 200
 
 
-@app.route("/v1/org/join", methods=["POST"])
+@app.route("/api/v1/org/join", methods=["POST"])
 @require_auth
 def org_join():
     data = request.get_json(force=True)
@@ -222,7 +222,7 @@ def org_join():
     return jsonify({"status": "joined", "org_id": "org-123", "name": "Demo Org"}), 200
 
 
-@app.route("/v1/org/create", methods=["POST"])
+@app.route("/api/v1/org/create", methods=["POST"])
 @require_auth
 def org_create():
     data = request.get_json(force=True)

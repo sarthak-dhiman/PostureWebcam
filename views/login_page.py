@@ -10,11 +10,10 @@ from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtCore import QUrl
 
-from core.constants import C
+from core.constants import C, APP_NAME
 from core.icons import icon
 from core.workers import LoginWorker
-from core.workers import OAuthPollWorker
-from core.constants import API_GOOGLE_OAUTH
+from core.workers import OAuthInitWorker, OAuthPollWorker
 
 
 class LoginPage(QWidget):
@@ -50,7 +49,7 @@ class LoginPage(QWidget):
         card_lay.addWidget(title)
         card_lay.addSpacing(6)
 
-        subtitle = QLabel("Sign in to Posture Webcam Analyzer")
+        subtitle = QLabel(f"Sign in to {APP_NAME}")
         subtitle.setObjectName("authSubtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_lay.addWidget(subtitle)
@@ -118,14 +117,14 @@ class LoginPage(QWidget):
         signup_btn = QPushButton("Sign up")
         signup_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         signup_btn.setObjectName("linkBtn")
-        signup_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("http://127.0.0.1:8000/v1/auth/signup")))
+        signup_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("http://localhost:3000/signup")))
         signup_row.addWidget(signup_btn)
         signup_row.addStretch()
         card_lay.addLayout(signup_row)
         card_lay.addSpacing(12)
 
         # Footer links (includes app name)
-        links = QLabel('<a href="https://example.com">Posture Webcam</a> • <a href="https://example.com/privacy">Privacy</a> • <a href="https://example.com/terms">Terms</a>')
+        links = QLabel(f'<a href="http://localhost:3000">{APP_NAME}</a> • <a href="http://localhost:3000/privacy">Privacy</a> • <a href="http://localhost:3000/terms">Terms</a>')
         links.setObjectName("mutedText")
         links.setAlignment(Qt.AlignmentFlag.AlignCenter)
         links.setOpenExternalLinks(True)
@@ -160,26 +159,19 @@ class LoginPage(QWidget):
         self._worker.start()
 
     def _on_google_clicked(self):
-        # Start the OAuth flow: request provider URL from backend, open in browser,
-        # and poll the backend for completion using OAuthPollWorker.
         self._error.setVisible(False)
         self._google_btn.setEnabled(False)
+        self._google_btn.setText("Connecting...")
+
+        self._oauth_init_worker = OAuthInitWorker()
+        self._oauth_init_worker.init_success.connect(self._on_oauth_init_success)
+        self._oauth_init_worker.init_failed.connect(self._on_oauth_init_failed)
+        self._oauth_init_worker.finished.connect(lambda: setattr(self, '_oauth_init_worker', None))
+        self._oauth_init_worker.start()
+
+    def _on_oauth_init_success(self, url: str, session: str):
         self._google_btn.setText("Opening browser...")
-
-        try:
-            import urllib.request, json
-            with urllib.request.urlopen(API_GOOGLE_OAUTH, timeout=5) as resp:
-                body = json.load(resp)
-                url = body.get("url")
-                session = body.get("session")
-        except Exception as exc:
-            self._error.setText(f"Failed to start OAuth: {exc}")
-            self._error.setVisible(True)
-            self._google_btn.setEnabled(True)
-            self._google_btn.setText("  Sign in with Google")
-            return
-
-        # Open provider URL in external browser
+        # Open the provider URL in the system browser
         QDesktopServices.openUrl(QUrl(url))
 
         # Start polling worker
@@ -188,6 +180,12 @@ class LoginPage(QWidget):
         self._oauth_worker.oauth_failed.connect(self._handle_oauth_failure)
         self._oauth_worker.finished.connect(self._cleanup_oauth)
         self._oauth_worker.start()
+
+    def _on_oauth_init_failed(self, msg: str):
+        self._error.setText(msg)
+        self._error.setVisible(True)
+        self._google_btn.setEnabled(True)
+        self._google_btn.setText("  Sign in with Google")
 
     def _handle_oauth_success(self, user: dict):
         self.login_success.emit(user)

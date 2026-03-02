@@ -12,6 +12,19 @@ _ROOT = os.path.dirname(os.path.abspath(__file__))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+# ── Windows taskbar icon fix ─────────────────────────────────────────────────
+# Setting an explicit App User Model ID causes Windows to group this process
+# under its own taskbar button and use the window's QIcon instead of the
+# generic python/pythonw.exe icon.  Must be called BEFORE QApplication().
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "PostureWebcamAnalyzer.App.1"
+        )
+    except Exception:
+        pass
+
 from PyQt6.QtWidgets import QApplication, QSplashScreen
 from PyQt6.QtGui import QFont, QPixmap, QPainter, QColor, QLinearGradient, QPen
 from PyQt6.QtCore import Qt, QRect
@@ -40,10 +53,16 @@ def _build_splash(app: QApplication) -> QSplashScreen:
     p.drawRect(0, 0, W, 4)
 
     # App name
+    try:
+        from core.constants import APP_NAME
+        _app_title = APP_NAME
+    except Exception:
+        _app_title = "Posture Tracker"
+
     title_font = QFont("Segoe UI", 26, QFont.Weight.Bold)
     p.setFont(title_font)
     p.setPen(QColor("#FFFFFF"))
-    p.drawText(QRect(0, 40, W, 60), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "Posture Tracker")
+    p.drawText(QRect(0, 40, W, 60), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, _app_title)
 
     # Tag line
     sub_font = QFont("Segoe UI", 11)
@@ -91,10 +110,16 @@ def _update_splash(splash: QSplashScreen, message: str, progress: int):
     p.setBrush(QColor("#6C63FF"))
     p.drawRect(0, 0, W, 4)
 
+    try:
+        from core.constants import APP_NAME
+        _app_title = APP_NAME
+    except Exception:
+        _app_title = "Posture Tracker"
+
     title_font = QFont("Segoe UI", 26, QFont.Weight.Bold)
     p.setFont(title_font)
     p.setPen(QColor("#FFFFFF"))
-    p.drawText(QRect(0, 40, W, 60), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, "Posture Tracker")
+    p.drawText(QRect(0, 40, W, 60), Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, _app_title)
 
     sub_font = QFont("Segoe UI", 11)
     p.setFont(sub_font)
@@ -154,7 +179,19 @@ def main():
     step("Applying stylesheet…", 22)
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
+    # Set the application icon (shown in taskbar, window title-bar, notifications)
+    try:
+        from PyQt6.QtGui import QIcon as _QIcon
+        _icon_path = os.path.join(_ROOT, "office.png")
+        if os.path.isfile(_icon_path):
+            app.setWindowIcon(_QIcon(_icon_path))
+    except Exception:
+        pass
     app.setStyleSheet(build_stylesheet())
+
+    # Do not start the tracker daemon while the user is signed out.
+    # The daemon and tracker thread will be started after successful login.
+    step("Preparing startup…", 30)
 
     step("Loading views…", 38)
     # Import all page modules now — this is where most time is spent
@@ -166,6 +203,13 @@ def main():
     step("Building main window…", 60)
     from app_window import MainWindow
     window = MainWindow()
+
+    # Ensure the tracker daemon is running before we show the dashboard so the
+    # UI can immediately read live stats from the background process.
+    try:
+        window.ensure_tracker_daemon()
+    except Exception:
+        pass
 
     step("Starting background services…", 82)
     EnhancedTrayIcon = None
@@ -198,6 +242,26 @@ def main():
     tray_icon = None
     if EnhancedTrayIcon is not None:
         try:
+            # Clear any stale live stats while signed out so the tray doesn't
+            # show an active tracker when no user is logged in.
+            try:
+                auth_path = os.path.join(_ROOT, "data", "auth_cache.json")
+                live_stats = os.path.join(_ROOT, "live_stats.json")
+                live_frame = os.path.join(_ROOT, "live_frame.jpg")
+                if not (os.path.exists(auth_path) and os.path.getsize(auth_path) > 0):
+                    try:
+                        if os.path.exists(live_stats):
+                            os.remove(live_stats)
+                    except Exception:
+                        pass
+                    try:
+                        if os.path.exists(live_frame):
+                            os.remove(live_frame)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             tray_icon = EnhancedTrayIcon(parent=None)
             window._tray_icon = tray_icon
         except Exception:

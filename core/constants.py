@@ -7,7 +7,7 @@ APP_VERSION = "1.0.0"
 
 # ── API endpoints (local mock server) ───────────────────────────────────────
 # During development the API points to a local mock running on port 8000.
-API_BASE = "http://127.0.0.1:8000/v1"
+API_BASE = "http://localhost:8000/api/v1"
 API_LOGIN = f"{API_BASE}/auth/login"
 API_GOOGLE_OAUTH = f"{API_BASE}/auth/google"
 API_GOOGLE_POLL = f"{API_BASE}/auth/google/poll"
@@ -15,7 +15,7 @@ API_VERIFY = f"{API_BASE}/auth/verify"
 API_JOIN_ORG = f"{API_BASE}/org/join"
 API_CREATE_ORG = f"{API_BASE}/org/create"
 
-BILLING_URL = "https://app.yourdomain.com/settings/billing"
+BILLING_URL = "http://localhost:3000/settings/billing"
 
 # ── Timing ───────────────────────────────────────────────────────────────────
 SUBSCRIPTION_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000  # 12 hours

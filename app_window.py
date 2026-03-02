@@ -2,17 +2,20 @@
 app_window.py — MainWindow: owns sidebar, QStackedWidget, SubscriptionMonitor.
 """
 
+import os as _os
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QStackedWidget,
     QPushButton, QSpacerItem, QSizePolicy, QFrame,
 )
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon
 
 from core.constants import (
     APP_NAME,
     PAGE_LOGIN, PAGE_JOIN_ORG, PAGE_DASHBOARD, PAGE_REPORTS, PAGE_ACCOUNT,
 )
-from core.workers import SubscriptionMonitor, _read_local_auth, PostureTrackerThread
+from core.workers import SubscriptionMonitor, _read_local_auth, _write_local_auth, _clear_local_auth, PostureTrackerThread
 from widgets.sidebar import Sidebar
 from views.login_page import LoginPage
 from views.join_org_page import JoinOrgPage
@@ -40,6 +43,13 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
+        # Set window/taskbar icon
+        try:
+            _icon_file = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "office.png")
+            if _os.path.isfile(_icon_file):
+                self.setWindowIcon(QIcon(_icon_file))
+        except Exception:
+            pass
         # Responsive default size: prefer ~95% width and limited height (not too tall)
         from PyQt6.QtWidgets import QApplication as _QApp
         _app = _QApp.instance()
@@ -141,28 +151,12 @@ class MainWindow(QMainWindow):
         self._account_page.logout_btn.clicked.connect(self._on_logout)
         self._account_page.settings_changed.connect(self._dashboard_page.reload_dial_config)
 
-        # ── Subscription monitor (starts immediately) ───────────────
-        self._sub_monitor = SubscriptionMonitor(parent=self)
-        self._sub_monitor.status_changed.connect(self._on_sub_status)
-        self._sub_monitor.start()
-
-        # ── Posture tracker thread (starts paused until subscription active)
-        try:
-            self._tracker = PostureTrackerThread(poll_interval_ms=500, parent=self)
-            # forward tracker samples → dashboard live stats
-            self._tracker.posture_update.connect(self._dashboard_page.on_posture_update)
-            # forward tracker samples → reports buffer
-            self._tracker.posture_update.connect(self._reports_page.append_sample)
-            # tracker obeys subscription status
-            self._sub_monitor.status_changed.connect(
-                lambda s, d: self._tracker.set_hold(s == "expired")
-            )
-            # dashboard toggle button wires to tracker
-            self._dashboard_page.tracking_toggled.connect(self._on_tracking_toggled)
-            # start thread (it will be on hold by default)
-            self._tracker.start()
-        except Exception:
-            self._tracker = None
+        # ── Subscription monitor and tracker are created only after login
+        # They must not run while the user is signed out.
+        self._sub_monitor = None
+        self._tracker = None
+        # Wire dashboard toggle; tracker may be created later
+        self._dashboard_page.tracking_toggled.connect(self._on_tracking_toggled)
 
         # Wire full shutdown to app quit (tray "Quit"), NOT to window close
         from PyQt6.QtWidgets import QApplication as _QApp
@@ -231,22 +225,60 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Start subscription monitoring now that we have a logged-in user
+        try:
+            if self._sub_monitor is None:
+                self._sub_monitor = SubscriptionMonitor(parent=self)
+                self._sub_monitor.status_changed.connect(self._on_sub_status)
+                self._sub_monitor.start()
+        except Exception:
+            pass
+
+        # Create and start tracker thread (kept on hold until subscription confirmed)
+        try:
+            if self._tracker is None:
+                self._tracker = PostureTrackerThread(poll_interval_ms=500, parent=self)
+                self._tracker.posture_update.connect(self._dashboard_page.on_posture_update)
+                self._tracker.posture_update.connect(self._reports_page.append_sample)
+                self._tracker.start()
+                # Tracker starts on hold — daemon will only be spawned once
+                # the subscription monitor confirms an active subscription.
+                try:
+                    self._tracker.set_hold(True)
+                except Exception:
+                    pass
+        except Exception:
+            self._tracker = None
+
         if user.get("first_time", False):
             self._stack.setCurrentIndex(PAGE_JOIN_ORG)
         else:
             self._show_main_app()
 
     def _on_org_joined(self):
+        # Mark onboarding complete in cache so next launch skips join-org
+        cached = _read_local_auth()
+        if cached:
+            cached["first_time"] = False
+            _write_local_auth(cached)
         self._show_main_app()
 
     def _show_main_app(self):
+        # Mark onboarding complete in cache so next launch goes straight to dashboard
+        cached = _read_local_auth()
+        if cached and cached.get("first_time"):
+            cached["first_time"] = False
+            _write_local_auth(cached)
         self._sidebar.setVisible(True)
         self._navigate_to(PAGE_DASHBOARD)
         # Always auto-start tracking when navigating to the dashboard —
         # the user is authenticated at this point so there is no reason to
         # block.  Deferred so the page paints its initial state first.
         try:
-            if self._tracker is not None:
+            # Only auto-start tracking if the user has an active subscription.
+            sub = (self._user or {}).get("subscription") or {}
+            has_sub = sub.get("status") == "active"
+            if has_sub:
                 from PyQt6.QtCore import QTimer
                 QTimer.singleShot(150, self._dashboard_page.auto_start_tracking)
         except Exception:
@@ -254,6 +286,13 @@ class MainWindow(QMainWindow):
 
     def _on_logout(self):
         self._user = None
+        _clear_local_auth()
+        # Immediately hold the tracker — don't wait for subscription monitor
+        try:
+            if hasattr(self, "_tracker") and self._tracker is not None:
+                self._tracker.set_hold(True)
+        except Exception:
+            pass
         self._sidebar.setVisible(False)
         self._login_page.reset()
         self._stack.setCurrentIndex(PAGE_LOGIN)
@@ -281,18 +320,34 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_sub_status(self, status: str, detail: str):
-        self._sidebar.set_subscription_status(status, detail)
-        self._account_page.set_subscription_status(status, detail)
+        """Handle subscription monitor changes and toggle tracker accordingly.
+
+        status values: "online" | "offline" | "expired"
+        """
+        try:
+            self._sidebar.set_subscription_status(status, detail)
+            self._account_page.set_subscription_status(status, detail)
+        except Exception:
+            pass
+
         # Show/hide dashboard subscription gate
         no_sub = (status == "expired")
         try:
             self._dashboard_page.show_subscription_gate(no_sub)
         except Exception:
             pass
-        # Toggle tracker hold state
+
+        # Determine hold state
+        if status == "online":
+            should_hold = False
+        elif status == "expired":
+            should_hold = True
+        else:  # offline
+            should_hold = self._user is None
+
         try:
             if hasattr(self, "_tracker") and self._tracker is not None:
-                self._tracker.set_hold(no_sub)
+                self._tracker.set_hold(should_hold)
         except Exception:
             pass
 
@@ -321,6 +376,22 @@ class MainWindow(QMainWindow):
                     pass
                 try:
                     self._tracker.wait(2000)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def ensure_tracker_daemon(self):
+        """Ensure the tracker daemon subprocess is running (no capture).
+
+        This is intended to be called once during startup so the dashboard can
+        immediately read live stats from the daemon when shown.
+        """
+        try:
+            if hasattr(self, "_tracker") and self._tracker is not None:
+                # Do not change hold state; only ensure daemon process exists
+                try:
+                    self._tracker.ensure_daemon_running()
                 except Exception:
                     pass
         except Exception:
