@@ -410,9 +410,19 @@ class PostureTrackerThread(QThread):
         if sys.platform == "win32":
             _popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
 
+        # In a frozen (PyInstaller --onedir) build tracker_daemon.py is compiled
+        # to tracker_daemon.exe in the same directory as the main executable.
+        # When running from source, use the Python interpreter + .py script as usual.
+        if getattr(sys, "frozen", False):
+            _exe_dir = os.path.dirname(sys.executable)
+            _daemon_exe = os.path.join(_exe_dir, "tracker_daemon.exe")
+            _cmd = [_daemon_exe, "--no-tray"]
+        else:
+            _cmd = [sys.executable, daemon_script, "--no-tray"]
+
         try:
             proc = subprocess.Popen(
-                [sys.executable, daemon_script, "--no-tray"],
+                _cmd,
                 **_popen_kwargs,
             )
             self._daemon_proc = proc

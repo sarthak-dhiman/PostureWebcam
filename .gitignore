@@ -8,3 +8,13 @@ __pycache__/
 live_frame.jpg
 live_stats.json
 posture.db
+
+build/
+icons/
+
+office.png
+office.ico
+PostureApp.spec
+rthook_paths.py
+webcam_guardian_setup.iss
+dist/

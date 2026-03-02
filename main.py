@@ -220,7 +220,14 @@ def main():
         pass
 
     step("Almost ready…", 95)
-    window.show()
+
+    # ── --minimized: boot directly to tray (used by auto-start registry key) ──
+    _minimized_boot = "--minimized" in sys.argv
+    if _minimized_boot:
+        # Don't show the main window; the tray icon will be the only presence.
+        window.hide()
+    else:
+        window.show()
 
     # Drain the paint queue so the window renders its first frame before
     # the splash disappears — prevents the blank/frozen-looking transition.
@@ -234,7 +241,10 @@ def main():
 
     if splash is not None:
         try:
-            splash.finish(window)
+            if _minimized_boot:
+                splash.hide()          # just dismiss; no window to raise
+            else:
+                splash.finish(window)
         except Exception:
             pass
 
