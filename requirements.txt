@@ -1,10 +1,17 @@
 mediapipe
 opencv-python
-face_recognition_models
+# dlib-bin provides prebuilt dlib wheels (avoids cmake build).
+# If unavailable for your OS/Python version, replace with 'dlib' and install cmake+boost first.
 dlib-bin
+face_recognition
+face_recognition_models
 pystray
 Pillow
 plyer
 PyQt6
 matplotlib
 plotly
+onnxruntime
+requests
+flask
+sqlalchemy

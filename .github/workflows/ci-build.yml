@@ -6,108 +6,178 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  # ──────────────────────────────────────────────
+  #  LINUX  →  dist/PostureApp  +  .AppImage
+  # ──────────────────────────────────────────────
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04   # glibc 2.31 — broadest distro compatibility
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
+
+      - name: Set up Python 3.10
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - name: Install system deps
+
+      # dlib needs: cmake, boost, c++ headers; OpenCV/Qt need: libGL, libXkb
+      - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget libgl1 libxkbcommon0
-      - name: Create virtualenv + install deps
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            wget cmake build-essential \
+            libboost-all-dev python3-dev \
+            libgl1-mesa-glx libglib2.0-0 \
+            libxkbcommon0 libdbus-1-3 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-xinerama0
+
+      # Install directly into the setup-python interpreter — no venv needed in CI
+      - name: Install Python dependencies
         run: |
-          python -m venv venv
-          . venv/bin/activate
-          pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller pillow
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller pillow
+          python -m pip install -r requirements.txt
+
       - name: Build with PyInstaller
+        run: python build_executable.py --skip-icon --verbose
+
+      - name: Package as AppImage
         run: |
-          . venv/bin/activate
-          python build_executable.py --verbose
-      - name: Prepare AppImage (optional)
-        run: |
-          # prepare AppDir
           mkdir -p AppDir/usr/bin
           cp -r dist/PostureApp/* AppDir/usr/bin/
-          # minimal desktop file
-          cat > AppDir/PostureApp.desktop <<'EOF'
-          [Desktop Entry]
-          Name=PostureApp
-          Exec=PostureApp/PostureApp
-          Icon=office
-          Type=Application
-          Categories=Utility;
-          EOF
-          # download appimagetool
-          wget -q https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage -O appimagetool.AppImage
+          # .desktop file (must be at AppDir root, un-indented)
+          cat > AppDir/PostureApp.desktop << 'DESKTOP'
+[Desktop Entry]
+Name=PostureApp
+Exec=PostureApp
+Icon=office
+Type=Application
+Categories=Utility;
+DESKTOP
+          # Copy icon if present
+          [ -f office.png ] && cp office.png AppDir/office.png || true
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage \
+            -O appimagetool.AppImage
           chmod +x appimagetool.AppImage
-          ./appimagetool.AppImage AppDir || true
+          ARCH=x86_64 ./appimagetool.AppImage AppDir PostureApp-linux-x86_64.AppImage || true
+
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
           name: linux-dist
           path: |
             dist/PostureApp
-            *.AppImage
+            PostureApp-linux-x86_64.AppImage
 
+  # ──────────────────────────────────────────────
+  #  MACOS  →  dist/PostureApp  zipped as DMG-ready .zip
+  # ──────────────────────────────────────────────
   build-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
+
+      - name: Set up Python 3.10
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - name: Create virtualenv + install deps
+
+      # dlib needs cmake on macOS (brew ships it already on GitHub runners,
+      # but be explicit to avoid flakiness)
+      - name: Install system dependencies
         run: |
-          python -m venv venv
-          . venv/bin/activate
-          pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller pillow
+          brew install cmake || true
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller pillow
+          python -m pip install -r requirements.txt
+
+      # macOS uses .icns — convert PNG using Pillow if available,
+      # otherwise fall back to --skip-icon (PyInstaller uses a default icon)
+      - name: Convert icon (PNG → ICNS for macOS)
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          png = Path("office.png")
+          if not png.exists():
+              print("office.png not found — skipping icon")
+              sys.exit(0)
+          try:
+              from PIL import Image
+              img = Image.open(png).convert("RGBA")
+              sizes = [(16,16),(32,32),(64,64),(128,128),(256,256),(512,512),(1024,1024)]
+              imgs = [img.resize(s) for s in sizes]
+              imgs[0].save("office.icns", format="ICNS", append_images=imgs[1:])
+              print("office.icns written")
+          except Exception as e:
+              print(f"Icon conversion failed ({e}) — skipping")
+          PY
+
       - name: Build with PyInstaller
         run: |
-          . venv/bin/activate
-          python build_executable.py --verbose || python -m PyInstaller PostureApp.spec
-      - name: Zip .app and upload
+          # Use .icns if available, otherwise skip icon
+          if [ -f office.icns ]; then
+            python build_executable.py --verbose
+          else
+            python build_executable.py --skip-icon --verbose
+          fi
+
+      - name: Create macOS zip
         run: |
-          if [ -d "dist/PostureApp.app" ]; then
+          if [ -d dist/PostureApp.app ]; then
             ditto -c -k --sequesterRsrc --keepParent dist/PostureApp.app PostureApp-macos.zip
           else
-            zip -r PostureApp-macos.zip dist/PostureApp || true
+            zip -r PostureApp-macos.zip dist/PostureApp
           fi
+
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mac-dist
           path: PostureApp-macos.zip
 
+  # ──────────────────────────────────────────────
+  #  WINDOWS  →  dist/PostureApp  + Inno Setup installer
+  # ──────────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python
+
+      - name: Set up Python 3.10
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - name: Create virtualenv + install deps
+
+      - name: Install Python dependencies
         run: |
-          python -m venv venv
-          .\venv\Scripts\activate
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller pillow
+          python -m pip install pyinstaller pillow
+          python -m pip install -r requirements.txt
+
       - name: Build with PyInstaller
-        run: |
-          .\venv\Scripts\activate
-          python build_executable.py --verbose || python -m PyInstaller PostureApp.spec
+        run: python build_executable.py --verbose
+
       - name: Archive Windows dist
+        run: Compress-Archive -Path dist\PostureApp -DestinationPath PostureApp-windows.zip
+
+      # Optional: compile Inno Setup installer if .iss is present
+      - name: Build Inno Setup installer
         run: |
-          powershell -Command "Compress-Archive -Path 'dist/PostureApp/*' -DestinationPath 'PostureApp-windows.zip'"
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if ((Test-Path $iscc) -and (Test-Path "webcam_guardian_setup.iss")) {
+            & $iscc "webcam_guardian_setup.iss"
+          } else {
+            Write-Host "Inno Setup not found or .iss not present — skipping installer build"
+          }
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-dist
-          path: PostureApp-windows.zip
+          path: |
+            PostureApp-windows.zip
+            dist\WebcamGuardianSetup.exe
