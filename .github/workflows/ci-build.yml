@@ -45,15 +45,9 @@ jobs:
         run: |
           mkdir -p AppDir/usr/bin
           cp -r dist/PostureApp/* AppDir/usr/bin/
-          # .desktop file (must be at AppDir root, un-indented)
-          cat > AppDir/PostureApp.desktop << 'DESKTOP'
-[Desktop Entry]
-Name=PostureApp
-Exec=PostureApp
-Icon=office
-Type=Application
-Categories=Utility;
-DESKTOP
+          # .desktop file
+          printf '[Desktop Entry]\nName=PostureApp\nExec=PostureApp\nIcon=office\nType=Application\nCategories=Utility;\n' \
+            > AppDir/PostureApp.desktop
           # Copy icon if present
           [ -f office.png ] && cp office.png AppDir/office.png || true
           wget -q https://github.com/AppImage/AppImageKit/releases/download/13/appimagetool-x86_64.AppImage \
@@ -97,24 +91,7 @@ DESKTOP
       # macOS uses .icns — convert PNG using Pillow if available,
       # otherwise fall back to --skip-icon (PyInstaller uses a default icon)
       - name: Convert icon (PNG → ICNS for macOS)
-        run: |
-          python - <<'PY'
-          import sys
-          from pathlib import Path
-          png = Path("office.png")
-          if not png.exists():
-              print("office.png not found — skipping icon")
-              sys.exit(0)
-          try:
-              from PIL import Image
-              img = Image.open(png).convert("RGBA")
-              sizes = [(16,16),(32,32),(64,64),(128,128),(256,256),(512,512),(1024,1024)]
-              imgs = [img.resize(s) for s in sizes]
-              imgs[0].save("office.icns", format="ICNS", append_images=imgs[1:])
-              print("office.icns written")
-          except Exception as e:
-              print(f"Icon conversion failed ({e}) — skipping")
-          PY
+        run: python scripts/convert_icon_macos.py
 
       - name: Build with PyInstaller
         run: |
