@@ -23,6 +23,7 @@ class DialWidget(QWidget):
         self._title = title
         self._total = max(1, total_seconds)
         self._remaining = total_seconds
+        self._base_color = color   # original color — never overwritten
         self._color = color
 
         self.setMinimumSize(110, 135)
@@ -37,11 +38,12 @@ class DialWidget(QWidget):
 
     def set_remaining(self, remaining_seconds: int):
         self._remaining = max(0, min(remaining_seconds, self._total))
-        # Shift colour green→amber→red as time runs low
+        # Only shift to warn colours in the final 25 % of time.
+        # Above that threshold keep the original colour the caller chose.
         frac = self._remaining / self._total
-        if frac > 0.5:
-            self._color = C.ACCENT_BLUE
-        elif frac > 0.25:
+        if frac > 0.25:
+            self._color = self._base_color
+        elif frac > 0.0:
             self._color = C.ACCENT_AMBER
         else:
             self._color = C.ACCENT_RED
@@ -83,7 +85,17 @@ class DialWidget(QWidget):
         arc_pen.setWidth(int(pen_w))
         arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(arc_pen)
-        painter.drawArc(arc_rect, start_angle, span_int)
+
+        if span_int > 0:
+            painter.drawArc(arc_rect, start_angle, span_int)
+        else:
+            # Remaining = 0: draw a full red ring to signal "alert active"
+            # rather than leaving an empty dark circle that looks broken.
+            alert_pen = QPen(QColor(C.ACCENT_RED))
+            alert_pen.setWidth(int(pen_w))
+            alert_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(alert_pen)
+            painter.drawArc(arc_rect, 0, 360 * 16)
 
         # ── centre label MM:SS ───────────────────────────────────────
         mins = self._remaining // 60

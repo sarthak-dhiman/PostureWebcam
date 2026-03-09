@@ -230,6 +230,49 @@ def org_create():
     return jsonify({"status": "created", "org_id": "org-456", "name": name}), 201
 
 
+# ── Quota endpoints ─────────────────────────────────────────────────────────
+# In-memory store: token -> remaining_seconds
+# Default: 10-hour free quota (36 000 s)
+QUOTA_STORE: dict[str, int] = {}
+_FREE_QUOTA_DEFAULT = 36_000  # 10 hours
+
+
+def _get_token_from_request() -> str | None:
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth.split(" ", 1)[1]
+    return None
+
+
+@app.route("/api/v1/quota/", methods=["GET"])
+@require_auth
+def quota_get():
+    token = _get_token_from_request()
+    remaining = QUOTA_STORE.get(token, _FREE_QUOTA_DEFAULT)
+    return jsonify({
+        "quota_remaining_seconds": remaining,
+        "is_free_tier": True,
+        "quota_total_seconds": _FREE_QUOTA_DEFAULT,
+    }), 200
+
+
+@app.route("/api/v1/quota/log/", methods=["POST"])
+@require_auth
+def quota_log():
+    token = _get_token_from_request()
+    data = request.get_json(force=True)
+    duration = int(data.get("duration_seconds", 0))
+    current = QUOTA_STORE.get(token, _FREE_QUOTA_DEFAULT)
+    new_remaining = max(0, current - duration)
+    QUOTA_STORE[token] = new_remaining
+    return jsonify({
+        "quota_remaining_seconds": new_remaining,
+        "is_free_tier": True,
+        "quota_total_seconds": _FREE_QUOTA_DEFAULT,
+        "session_logged_seconds": duration,
+    }), 200
+
+
 if __name__ == "__main__":
     print("Starting mock API on http://127.0.0.1:8000")
     app.run(host="127.0.0.1", port=8000)

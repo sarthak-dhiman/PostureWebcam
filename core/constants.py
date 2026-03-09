@@ -12,8 +12,10 @@ API_LOGIN = f"{API_BASE}/auth/login"
 API_GOOGLE_OAUTH = f"{API_BASE}/auth/google"
 API_GOOGLE_POLL = f"{API_BASE}/auth/google/poll"
 API_VERIFY = f"{API_BASE}/auth/verify"
-API_JOIN_ORG = f"{API_BASE}/org/join"
+API_JOIN_ORG   = f"{API_BASE}/org/join"
 API_CREATE_ORG = f"{API_BASE}/org/create"
+API_QUOTA      = f"{API_BASE}/quota/"
+API_QUOTA_LOG  = f"{API_BASE}/quota/log/"
 
 BILLING_URL = "http://localhost:3000/settings/billing"
 

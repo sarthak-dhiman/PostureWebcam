@@ -17,6 +17,9 @@ from core.constants import (
     API_LOGIN,
     API_GOOGLE_OAUTH,
     API_GOOGLE_POLL,
+    API_JOIN_ORG,
+    API_QUOTA,
+    API_QUOTA_LOG,
 )
 
 
@@ -68,6 +71,26 @@ def _clear_local_auth() -> None:
         pass
 
 
+def _decode_jwt_expiry(token: str) -> str | None:
+    """Extract the 'exp' claim from a JWT without verifying the signature.
+    Returns an ISO-format UTC datetime string, or None on any failure."""
+    try:
+        import base64, json as _json
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        # Add padding so base64 doesn't complain
+        payload_b64 = parts[1] + "=" * (4 - len(parts[1]) % 4)
+        payload = _json.loads(base64.urlsafe_b64decode(payload_b64))
+        exp = payload.get("exp")
+        if exp is None:
+            return None
+        from datetime import datetime, timezone
+        return datetime.fromtimestamp(int(exp), tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  LoginWorker
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,13 +131,32 @@ class LoginWorker(QThread):
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     if resp.status in (200, 201):
                         body = json.load(resp)
+                        # Support both mock format ("token") and Django SimpleJWT
+                        # format ("access" / "access_token") so we always cache a
+                        # real token string.
+                        resolved_token = (
+                            body.get("token")
+                            or body.get("access")
+                            or body.get("access_token")
+                        )
+                        resolved_expiry = (
+                            body.get("expires_at")
+                            or body.get("expiry")
+                            or body.get("access_expiration")
+                            or body.get("access_token_expiry")
+                        )
+                        # If the server didn't return an expiry, decode it
+                        # from the JWT payload (Django SimpleJWT stores it
+                        # in the 'exp' claim).
+                        if not resolved_expiry and resolved_token:
+                            resolved_expiry = _decode_jwt_expiry(resolved_token)
                         user = {
                             "email": body.get("email", self._email),
                             "name": body.get("name", self._email.split("@")[0].title()),
                             "plan": body.get("plan", "—"),
                             "first_time": body.get("first_time", False),
-                            "token": body.get("token"),
-                            "expires_at": body.get("expires_at"),
+                            "token": resolved_token,
+                            "expires_at": resolved_expiry,
                             "subscription": body.get("subscription") or {},
                         }
                         _write_local_jwt_expiry(user["expires_at"])
@@ -155,9 +197,14 @@ class SubscriptionMonitor(QThread):
 
     status_changed = pyqtSignal(str, str)
 
-    def __init__(self, parent=None):
+    def __init__(self, token: str | None = None, parent=None):
         super().__init__(parent)
         self._running = True
+        # Explicit session token takes precedence over the disk cache. This
+        # avoids a race where the monitor reads the cache before a fresh token
+        # has been flushed, and prevents false "Not logged in" errors when the
+        # cached token is null (e.g. backend uses "access" key).
+        self._session_token = token
 
     # ── public control ──────────────────────────────────────────────────
     def stop(self):
@@ -178,11 +225,22 @@ class SubscriptionMonitor(QThread):
         import urllib.request
         import urllib.error
 
-        _cached = _read_local_auth()
-        _stored_token = (_cached or {}).get("token")
+        # Prefer the in-memory token passed at construction (avoids disk race
+        # conditions and handles backends that use "access" instead of "token").
+        if self._session_token:
+            _stored_token = self._session_token
+        else:
+            _cached = _read_local_auth()
+            # Support both mock format ("token") and Django SimpleJWT ("access" /
+            # "access_token") — normalised at login time, but defend here too.
+            _stored_token = (
+                (_cached or {}).get("token")
+                or (_cached or {}).get("access")
+                or (_cached or {}).get("access_token")
+            )
 
         if not _stored_token:
-            self.status_changed.emit("expired", "Not logged in.")
+            self.status_changed.emit("offline", "Cannot verify subscription — no session token.")
             return
 
         try:
@@ -541,3 +599,165 @@ class PostureTrackerThread(QThread):
 
             # sleep between polls
             self.msleep(self._interval)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  OrgJoinWorker
+# ─────────────────────────────────────────────────────────────────────────────
+
+class OrgJoinWorker(QThread):
+    """POST /api/v1/org/join with the given invite code.
+
+    Signals
+    -------
+    join_success(str)   – org name returned by server
+    join_failed(str)    – human-readable error message
+    """
+
+    join_success = pyqtSignal(str)
+    join_failed  = pyqtSignal(str)
+
+    def __init__(self, invite_code: str, token: str = "", parent=None):
+        super().__init__(parent)
+        self._code  = invite_code.strip()
+        # Token is passed in directly from the main thread so the worker
+        # never has to read from disk (avoids race-conditions / path issues).
+        # Fall back to disk read only when not supplied.
+        if token:
+            self._token = token
+        else:
+            cached = _read_local_auth()
+            self._token = (cached or {}).get("token") or ""
+
+    def run(self):
+        import urllib.request
+        import urllib.error
+
+        if not self._code:
+            self.join_failed.emit("Please enter an invite code.")
+            return
+
+        token = self._token
+        if not token:
+            self.join_failed.emit("You must be logged in to join an organisation.")
+            return
+
+        try:
+            payload = json.dumps({"invite_code": self._code}).encode("utf-8")
+            req = urllib.request.Request(API_JOIN_ORG, data=payload, method="POST")
+            req.add_header("Content-Type", "application/json")
+            # Strip any existing "Bearer " prefix so it is never doubled
+            _bare = token[7:] if token.startswith("Bearer ") else token
+            req.add_header("Authorization", f"Bearer {_bare}")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                body = json.load(resp)
+                org_name = body.get("name") or body.get("org_id") or "Organisation"
+                self.join_success.emit(org_name)
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.load(e)
+                msg = body.get("error") or body.get("message") or f"HTTP {e.code}"
+            except Exception:
+                msg = f"HTTP {e.code}: {e.reason}"
+            if e.code == 401:
+                self.join_failed.emit("Session expired. Please log in again.")
+            elif e.code == 404:
+                self.join_failed.emit("Invite code not found. Please check and try again.")
+            else:
+                self.join_failed.emit(f"Could not join: {msg}")
+        except urllib.error.URLError:
+            self.join_failed.emit("Cannot reach the server. Please check your connection.")
+        except Exception as exc:
+            self.join_failed.emit(f"Unexpected error: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  QuotaFetchWorker
+# ─────────────────────────────────────────────────────────────────────────────
+
+class QuotaFetchWorker(QThread):
+    """GET /api/v1/quota/ — fetches remaining quota for the current user.
+
+    Signals
+    -------
+    quota_fetched(int, bool)  – (quota_remaining_seconds, is_free_tier)
+    quota_failed(str)         – human-readable error
+    """
+
+    quota_fetched = pyqtSignal(int, bool)
+    quota_failed  = pyqtSignal(str)
+
+    def __init__(self, token: str, parent=None):
+        super().__init__(parent)
+        _bare = token[7:] if token.startswith("Bearer ") else token
+        self._token = _bare
+
+    def run(self):
+        import urllib.request
+        import urllib.error
+        try:
+            req = urllib.request.Request(API_QUOTA, method="GET")
+            req.add_header("Authorization", f"Bearer {self._token}")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                body = json.load(resp)
+                remaining = int(body.get("quota_remaining_seconds", 0))
+                is_free   = bool(body.get("is_free_tier", False))
+                self.quota_fetched.emit(remaining, is_free)
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.load(e)
+                msg = body.get("error") or body.get("message") or f"HTTP {e.code}"
+            except Exception:
+                msg = f"HTTP {e.code}: {e.reason}"
+            self.quota_failed.emit(f"Could not fetch quota: {msg}")
+        except urllib.error.URLError:
+            self.quota_failed.emit("Cannot reach server — quota unavailable offline.")
+        except Exception as exc:
+            self.quota_failed.emit(f"Quota fetch error: {exc}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  QuotaLogWorker
+# ─────────────────────────────────────────────────────────────────────────────
+
+class QuotaLogWorker(QThread):
+    """POST /api/v1/quota/log/ — logs session duration and returns updated quota.
+
+    Signals
+    -------
+    quota_updated(int)  – new quota_remaining_seconds after the session
+    quota_log_failed(str)
+    """
+
+    quota_updated    = pyqtSignal(int)
+    quota_log_failed = pyqtSignal(str)
+
+    def __init__(self, duration_seconds: int, token: str, parent=None):
+        super().__init__(parent)
+        self._duration = int(duration_seconds)
+        _bare = token[7:] if token.startswith("Bearer ") else token
+        self._token = _bare
+
+    def run(self):
+        import urllib.request
+        import urllib.error
+        try:
+            payload = json.dumps({"duration_seconds": self._duration}).encode("utf-8")
+            req = urllib.request.Request(API_QUOTA_LOG, data=payload, method="POST")
+            req.add_header("Content-Type", "application/json")
+            req.add_header("Authorization", f"Bearer {self._token}")
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                body = json.load(resp)
+                remaining = int(body.get("quota_remaining_seconds", 0))
+                self.quota_updated.emit(remaining)
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.load(e)
+                msg = body.get("error") or body.get("message") or f"HTTP {e.code}"
+            except Exception:
+                msg = f"HTTP {e.code}: {e.reason}"
+            self.quota_log_failed.emit(f"Could not log session: {msg}")
+        except urllib.error.URLError:
+            self.quota_log_failed.emit("Cannot reach server — session not logged.")
+        except Exception as exc:
+            self.quota_log_failed.emit(f"Quota log error: {exc}")

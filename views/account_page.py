@@ -70,7 +70,8 @@ def _save_config(cfg: dict):
 
 
 class AccountPage(QWidget):
-    settings_changed = pyqtSignal()   # emitted whenever tracker settings are saved
+    settings_changed   = pyqtSignal()   # emitted whenever tracker settings are saved
+    join_org_requested = pyqtSignal()   # emitted when user clicks Join Organisation
     """Displays current plan info, tracker settings, and billing redirect."""
 
     def __init__(self, parent=None):
@@ -141,6 +142,14 @@ class AccountPage(QWidget):
         manage_btn.setFixedWidth(220)
         manage_btn.clicked.connect(self._open_billing)
         btn_row.addWidget(manage_btn)
+        btn_row.addSpacing(12)
+        join_btn = QPushButton("⊕  Join Organisation")
+        join_btn.setObjectName("secondaryBtn")
+        join_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        join_btn.setFixedWidth(180)
+        join_btn.setToolTip("Join an organisation using an invite code")
+        join_btn.clicked.connect(self.join_org_requested.emit)
+        btn_row.addWidget(join_btn)
         btn_row.addSpacing(12)
         logout_btn = QPushButton("Log Out")
         logout_btn.setObjectName("dangerBtn")

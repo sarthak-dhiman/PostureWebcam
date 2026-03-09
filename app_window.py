@@ -15,7 +15,7 @@ from core.constants import (
     APP_NAME,
     PAGE_LOGIN, PAGE_JOIN_ORG, PAGE_DASHBOARD, PAGE_REPORTS, PAGE_ACCOUNT,
 )
-from core.workers import SubscriptionMonitor, _read_local_auth, _write_local_auth, _clear_local_auth, PostureTrackerThread
+from core.workers import SubscriptionMonitor, _read_local_auth, _write_local_auth, _clear_local_auth, PostureTrackerThread, QuotaFetchWorker, QuotaLogWorker, _decode_jwt_expiry
 from widgets.sidebar import Sidebar
 from views.login_page import LoginPage
 from views.join_org_page import JoinOrgPage
@@ -145,11 +145,17 @@ class MainWindow(QMainWindow):
         # ── Wire auth signals ───────────────────────────────────────
         self._login_page.login_success.connect(self._on_login_success)
         self._join_org_page.org_joined.connect(self._on_org_joined)
+        self._join_org_page.cancelled.connect(self._on_join_org_cancelled)
         # When user requests to join from settings, navigate to the join-org widget
         self._user_settings_page.go_to_join.connect(lambda: self._stack.setCurrentIndex(self._stack.indexOf(self._join_org_page)))
         self._user_settings_page.solo_continue.connect(self._show_main_app)
         self._account_page.logout_btn.clicked.connect(self._on_logout)
         self._account_page.settings_changed.connect(self._dashboard_page.reload_dial_config)
+        # Join Organisation button wired from both dashboard and account page
+        self._account_page.join_org_requested.connect(self._open_join_org)
+        self._dashboard_page.join_org_requested.connect(self._open_join_org)
+        # Quota: log session duration when the user stops tracking
+        self._dashboard_page.session_ended.connect(self._on_session_ended)
 
         # ── Subscription monitor and tracker are created only after login
         # They must not run while the user is signed out.
@@ -166,11 +172,26 @@ class MainWindow(QMainWindow):
 
         # ── Auto-login from cache if available ─────────────────────
         cached = _read_local_auth()
-        if cached and cached.get("token") and cached.get("expires_at"):
+        if cached and cached.get("token"):
             try:
+                token = cached.get("token")
                 exp = cached.get("expires_at")
+                # expires_at may be null when Django SimpleJWT doesn't return
+                # it as a separate field — decode from the JWT payload instead.
+                if not exp and token:
+                    exp = _decode_jwt_expiry(token)
+                    if exp:
+                        # Persist it so future launches don't have to decode
+                        cached["expires_at"] = exp
+                        _write_local_auth(cached)
                 from datetime import datetime, timezone
-                if datetime.fromisoformat(exp) > datetime.now(timezone.utc):
+                # If we still have no expiry, assume the token is valid (the
+                # SubscriptionMonitor will reject it with 401 if it's not).
+                token_valid = (
+                    not exp
+                    or datetime.fromisoformat(exp) > datetime.now(timezone.utc)
+                )
+                if token_valid:
                     # Restore user state
                     self._user = cached
                     self._sidebar.set_user_email(cached.get("email", ""))
@@ -181,6 +202,38 @@ class MainWindow(QMainWindow):
                     has_sub = sub.get("status") == "active"
                     try:
                         self._dashboard_page.show_subscription_gate(not has_sub)
+                    except Exception:
+                        pass
+
+                    # Update account page subscription status from cached data
+                    try:
+                        if has_sub:
+                            # Show a friendly cached-online message until monitor verifies
+                            self._account_page.set_subscription_status("online", "Subscription active — verified from cache.")
+                        else:
+                            # If no active subscription found in cache, show offline/cached state
+                            self._account_page.set_subscription_status("offline", "No active subscription (cached).")
+                    except Exception:
+                        pass
+
+                    # Start the subscription monitor so the app can verify the subscription in background
+                    try:
+                        if self._sub_monitor is None:
+                            _session_token = cached.get("token")
+                            self._sub_monitor = SubscriptionMonitor(token=_session_token, parent=self)
+                            self._sub_monitor.status_changed.connect(self._on_sub_status)
+                            self._sub_monitor.start()
+                    except Exception:
+                        pass
+
+                    # Fetch quota for free-tier display (auto-login path)
+                    try:
+                        _qtoken = cached.get("token") or ""
+                        if _qtoken:
+                            _qw = QuotaFetchWorker(token=_qtoken, parent=self)
+                            _qw.quota_fetched.connect(self._on_quota_fetched)
+                            _qw.quota_failed.connect(self._on_quota_fetch_failed)
+                            _qw.start()
                     except Exception:
                         pass
 
@@ -228,7 +281,8 @@ class MainWindow(QMainWindow):
         # Start subscription monitoring now that we have a logged-in user
         try:
             if self._sub_monitor is None:
-                self._sub_monitor = SubscriptionMonitor(parent=self)
+                _session_token = user.get("token")
+                self._sub_monitor = SubscriptionMonitor(token=_session_token, parent=self)
                 self._sub_monitor.status_changed.connect(self._on_sub_status)
                 self._sub_monitor.start()
         except Exception:
@@ -255,6 +309,17 @@ class MainWindow(QMainWindow):
         else:
             self._show_main_app()
 
+        # Fetch free-tier quota in the background (non-blocking)
+        try:
+            _qtoken = user.get("token") or ""
+            if _qtoken:
+                _qw = QuotaFetchWorker(token=_qtoken, parent=self)
+                _qw.quota_fetched.connect(self._on_quota_fetched)
+                _qw.quota_failed.connect(self._on_quota_fetch_failed)
+                _qw.start()
+        except Exception:
+            pass
+
     def _on_org_joined(self):
         # Mark onboarding complete in cache so next launch skips join-org
         cached = _read_local_auth()
@@ -262,6 +327,26 @@ class MainWindow(QMainWindow):
             cached["first_time"] = False
             _write_local_auth(cached)
         self._show_main_app()
+
+    def _open_join_org(self):
+        """Open the Join Organisation page on-demand (from dashboard or account)."""
+        # Remember which page the user came from so cancel returns them there
+        self._join_org_return_page = self._stack.currentIndex()
+        try:
+            self._join_org_page.reset()
+        except Exception:
+            pass
+        # Show the back button for context
+        self._back_btn.setVisible(False)
+        self._stack.setCurrentIndex(self._stack.indexOf(self._join_org_page))
+
+    def _on_join_org_cancelled(self):
+        """Return to whatever page was active before the join-org page was opened."""
+        return_to = getattr(self, "_join_org_return_page", PAGE_DASHBOARD)
+        # Clamp to a valid authenticated page
+        if return_to in (PAGE_LOGIN, PAGE_JOIN_ORG):
+            return_to = PAGE_DASHBOARD
+        self._navigate_to(return_to)
 
     def _show_main_app(self):
         # Mark onboarding complete in cache so next launch goes straight to dashboard
@@ -271,16 +356,46 @@ class MainWindow(QMainWindow):
             _write_local_auth(cached)
         self._sidebar.setVisible(True)
         self._navigate_to(PAGE_DASHBOARD)
-        # Always auto-start tracking when navigating to the dashboard —
-        # the user is authenticated at this point so there is no reason to
-        # block.  Deferred so the page paints its initial state first.
+        # Auto-start tracking — the subscription gate already blocks the UI
+        # when there is no active subscription, so there is no need to
+        # double-guard here with a has_sub check.
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(150, self._dashboard_page.auto_start_tracking)
+
+    # ── Quota ───────────────────────────────────────────────────────────────────────
+
+    def _on_quota_fetched(self, remaining: int, is_free: bool):
+        """Received after login — push quota state into the dashboard."""
         try:
-            # Only auto-start tracking if the user has an active subscription.
-            sub = (self._user or {}).get("subscription") or {}
-            has_sub = sub.get("status") == "active"
-            if has_sub:
-                from PyQt6.QtCore import QTimer
-                QTimer.singleShot(150, self._dashboard_page.auto_start_tracking)
+            self._dashboard_page.set_quota(remaining, is_free)
+        except Exception:
+            pass
+
+    def _on_quota_fetch_failed(self, _err: str):
+        """Quota endpoint unreachable (offline / server down).
+        Fall back to showing the default free-tier quota so the bar is
+        always visible rather than silently hidden."""
+        try:
+            # Keep whatever quota was already set; if nothing was set yet,
+            # default to 10 h free tier so the counter is always visible.
+            self._dashboard_page.show_default_quota_if_unset()
+        except Exception:
+            pass
+
+    def _on_session_ended(self, elapsed: int):
+        """Fires when the user stops a tracking session — log duration to the server."""
+        if elapsed <= 0:
+            return
+        try:
+            token = (self._user or {}).get("token") or ""
+            if not token:
+                _cached = _read_local_auth()
+                token = (_cached or {}).get("token") or ""
+            if not token:
+                return
+            _lw = QuotaLogWorker(duration_seconds=elapsed, token=token, parent=self)
+            _lw.quota_updated.connect(self._dashboard_page.update_quota)
+            _lw.start()
         except Exception:
             pass
 

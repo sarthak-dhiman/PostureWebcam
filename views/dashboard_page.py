@@ -10,6 +10,7 @@ Changes:
 
 from datetime import datetime, timezone
 import json as _json
+import time as _time
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -48,7 +49,11 @@ class DashboardPage(QWidget):
 
     # Emitted when user clicks Start/Stop; True = wants tracking ON
     tracking_toggled = pyqtSignal(bool)
-
+    # Emitted when user clicks “Join Organisation”
+    join_org_requested = pyqtSignal()    # Emitted when a tracking session ends with the elapsed seconds
+    session_ended = pyqtSignal(int)
+    # Emitted (no args) when quota is fully exhausted mid-session
+    quota_exhausted = pyqtSignal()
     def __init__(self, parent=None):
         super().__init__(parent)
         # MJPEG client thread (started when tracking starts)
@@ -60,6 +65,20 @@ class DashboardPage(QWidget):
         self._bad_count  = 0
         self._alert_count = 0
         self._session_start: datetime | None = None
+
+        # Quota state (populated after login via set_quota)
+        # Default to free-tier with 10 h quota so the bar is visible
+        # immediately after launch; set_quota() will override with server data.
+        _FREE_QUOTA_DEFAULT = 36_000  # 10 hours in seconds
+        self._quota_remaining: int | None = _FREE_QUOTA_DEFAULT
+        self._is_free_tier: bool = True
+        self._session_start_time: float | None = None  # wall-clock time.time()
+
+        # Bad-posture streak tracking: the daemon accumulates bad_streak_sec
+        # continuously across GUI sessions.  We store the value seen at the
+        # moment the session starts so the dial is always session-relative.
+        self._bad_streak_baseline: int = 0
+        self._bad_streak_baseline_set: bool = False
 
         # load interval settings for dials
         cfg = _load_config()
@@ -79,9 +98,24 @@ class DashboardPage(QWidget):
         root.setContentsMargins(32, 28, 32, 28)
         root.setSpacing(0)
 
+        # Header row — title on left, Join Organisation button on right
+        hdr_row = QHBoxLayout()
+        hdr_row.setContentsMargins(0, 0, 0, 0)
         hdr = QLabel("Dashboard")
         hdr.setObjectName("pageHeader")
-        root.addWidget(hdr)
+        hdr_row.addWidget(hdr)
+        hdr_row.addStretch()
+        join_org_btn = QPushButton("⊕  Join Organisation")
+        join_org_btn.setObjectName("secondaryBtn")
+        join_org_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        join_org_btn.setFixedHeight(34)
+        join_org_btn.setStyleSheet(
+            f"font-size: 12px; padding: 0 16px; border-radius: 7px;"
+        )
+        join_org_btn.setToolTip("Join an organisation using an invite code")
+        join_org_btn.clicked.connect(self.join_org_requested.emit)
+        hdr_row.addWidget(join_org_btn)
+        root.addLayout(hdr_row)
 
         sub = QLabel("Monitor your posture in real time.")
         sub.setObjectName("pageSubheader")
@@ -97,7 +131,23 @@ class DashboardPage(QWidget):
             f"background: {C.BG_INPUT}; border-radius: 8px; color: {C.TEXT_SECONDARY};"
         )
         root.addWidget(self._status_bar)
-        root.addSpacing(14)
+        root.addSpacing(6)
+
+        # ── Quota bar (only visible for free-tier users) ─────────────
+        self._quota_bar = QLabel()
+        self._quota_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._quota_bar.setStyleSheet(
+            f"font-size: 12px; font-weight: 600; padding: 4px 14px; "
+            f"background: {C.BG_INPUT}; border-radius: 8px; color: {C.ACCENT_AMBER};"
+        )
+        self._quota_bar.setVisible(False)
+        root.addWidget(self._quota_bar)
+        root.addSpacing(8)
+
+        # 30-second timer to auto-stop when free quota is exhausted
+        self._quota_check_timer = QTimer(self)
+        self._quota_check_timer.setInterval(30_000)
+        self._quota_check_timer.timeout.connect(self._check_quota_mid_session)
 
         # ── Webcam live feed ─────────────────────────────────────────
         cam_frame = QFrame()
@@ -240,6 +290,9 @@ class DashboardPage(QWidget):
         # Start with gate hidden (will be shown if subscription missing)
         self._outer_stack.setCurrentIndex(0)
 
+        # Paint the quota bar immediately with the default values
+        self._refresh_quota_bar()
+
     def _refresh_cam_frame(self):
         """Load the latest live_frame.jpg written by tracker_daemon and display it."""
         try:
@@ -362,7 +415,19 @@ class DashboardPage(QWidget):
         # Update countdown dials
         eye_elapsed = int(sample.get("eye_elapsed_sec", 0) or 0)
         sit_elapsed = int(sample.get("sit_elapsed_sec", 0) or 0)
-        bad_elapsed = int(sample.get("bad_streak_sec",  0) or 0)
+        bad_raw     = int(sample.get("bad_streak_sec",  0) or 0)
+
+        # Compute session-relative bad streak: subtract the baseline captured
+        # at session start.  If the daemon resets (posture went good, streak
+        # dropped to 0 or below baseline), update the baseline too.
+        if not self._bad_streak_baseline_set:
+            self._bad_streak_baseline = bad_raw
+            self._bad_streak_baseline_set = True
+        if bad_raw < self._bad_streak_baseline:
+            # Daemon reset the streak (good posture detected) — new baseline
+            self._bad_streak_baseline = bad_raw
+        bad_elapsed = bad_raw - self._bad_streak_baseline
+
         self._eye_dial.set_remaining(max(0, self._eye_total_sec - eye_elapsed))
         self._sit_dial.set_remaining(max(0, self._sit_total_sec - sit_elapsed))
         self._bad_dial.set_remaining(max(0, self._bad_total_sec - bad_elapsed))
@@ -399,15 +464,32 @@ class DashboardPage(QWidget):
     def _on_toggle(self):
         self._tracking = not self._tracking
         if self._tracking:
+            # ── Block start if free quota is exhausted ───────────────
+            if self._is_free_tier and self._quota_remaining is not None and self._quota_remaining <= 0:
+                self._tracking = False  # revert toggle
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(
+                    self, "Quota Exhausted",
+                    "You\'ve used your free monitoring quota.\n"
+                    "Please upgrade your plan to continue tracking."
+                )
+                return
+
             self._toggle_btn.setText("  Stop Tracking")
             self._toggle_btn.setIcon(icon("stop"))
             self._toggle_btn.setProperty("tracking", "true")
             self._session_start = datetime.now(timezone.utc)
+            self._session_start_time = _time.time()
             self._good_count = 0
             self._bad_count  = 0
             self._alert_count = 0
+            # Reset bad-streak baseline so the dial counts from 0 for this session
+            self._bad_streak_baseline = 0
+            self._bad_streak_baseline_set = False
             self._status_bar.setText("Status: Starting...")
             self._frame_timer.start()
+            if self._is_free_tier:
+                self._quota_check_timer.start()
             # start MJPEG client for smooth preview (best-effort)
             try:
                 self._mjpeg_thread = MJPEGStreamThread()
@@ -420,6 +502,14 @@ class DashboardPage(QWidget):
             self._sit_dial.set_remaining(self._sit_total_sec)
             self._bad_dial.set_remaining(self._bad_total_sec)
         else:
+            self._quota_check_timer.stop()
+            # Compute elapsed seconds and emit for quota logging
+            elapsed = 0
+            if self._session_start_time is not None:
+                elapsed = int(_time.time() - self._session_start_time)
+                self._session_start_time = None
+            self.session_ended.emit(elapsed)
+
             self._toggle_btn.setText("  Start Tracking")
             self._toggle_btn.setIcon(icon("play"))
             self._toggle_btn.setProperty("tracking", "false")
@@ -446,6 +536,69 @@ class DashboardPage(QWidget):
         self._toggle_btn.style().polish(self._toggle_btn)
 
         self.tracking_toggled.emit(self._tracking)
+
+    # ── Quota helpers ────────────────────────────────────────────────────
+
+    def set_quota(self, remaining_seconds: int, is_free_tier: bool):
+        """Called once after login to initialise quota display."""
+        self._quota_remaining = remaining_seconds
+        self._is_free_tier = is_free_tier
+        self._refresh_quota_bar()
+
+    def update_quota(self, remaining_seconds: int):
+        """Called after a session ends to reflect the fresh quota from the server."""
+        self._quota_remaining = remaining_seconds
+        self._refresh_quota_bar()
+
+    def show_default_quota_if_unset(self):
+        """Called when the quota API is unreachable.
+        If the bar is already showing real server data, leave it alone;
+        otherwise keep the default free-tier values so the bar stays visible."""
+        # _is_free_tier defaults True; just re-paint in case something cleared it.
+        self._is_free_tier = True
+        if self._quota_remaining is None:
+            self._quota_remaining = 36_000
+        self._refresh_quota_bar()
+
+    def _refresh_quota_bar(self):
+        """Repaints the quota bar string and visibility."""
+        if not self._is_free_tier or self._quota_remaining is None:
+            self._quota_bar.setVisible(False)
+            return
+        remaining = max(0, self._quota_remaining)
+        hours   = remaining // 3600
+        minutes = (remaining % 3600) // 60
+        if remaining <= 0:
+            text  = "Free quota exhausted — upgrade to keep monitoring"
+            color = C.ACCENT_RED
+        else:
+            text  = f"Free Plan: {hours}h {minutes}m remaining"
+            color = C.ACCENT_AMBER
+        self._quota_bar.setText(text)
+        self._quota_bar.setStyleSheet(
+            f"font-size: 12px; font-weight: 600; padding: 4px 14px; "
+            f"background: {C.BG_INPUT}; border-radius: 8px; color: {color};"
+        )
+        self._quota_bar.setVisible(True)
+
+    def _check_quota_mid_session(self):
+        """Fires every 30 s while tracking on a free tier — auto-stops on exhaustion."""
+        if self._session_start_time is None or self._quota_remaining is None:
+            return
+        elapsed = _time.time() - self._session_start_time
+        if elapsed >= self._quota_remaining:
+            # Auto-stop the session
+            self._quota_check_timer.stop()
+            self.quota_exhausted.emit()
+            from PyQt6.QtWidgets import QMessageBox
+            # Toggle off to trigger the normal stop path (logs session, resets UI)
+            if self._tracking:
+                self._on_toggle()
+            QMessageBox.information(
+                self, "Free Quota Exhausted",
+                "Your free monitoring quota has been used up.\n"
+                "Upgrade your plan to keep tracking."
+            )
 
     @staticmethod
     def _open_billing():
