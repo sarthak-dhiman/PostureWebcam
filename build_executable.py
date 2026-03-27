@@ -147,7 +147,7 @@ def _run_pyinstaller(verbose: bool):
     _ok("PyInstaller finished successfully")
 
 
-def _post_process():
+def _post_process(demo_mode: bool = False, dev_mode: bool = False):
     """Clean sensitive files and ensure required dirs exist in the dist."""
     _step("Post-processing dist/PostureApp/")
 
@@ -187,6 +187,17 @@ def _post_process():
     info_path.write_text(json.dumps(build_info, indent=2), encoding="utf-8")
     _ok(f"Wrote {info_path.name}")
 
+    # Runtime config consumed by core/constants.py in both source and frozen app.
+    runtime_cfg_path = DIST / "data" / "runtime_config.json"
+    runtime_cfg = {
+        "demo_mode": bool(demo_mode),
+        "dev_mode": bool(dev_mode),
+        "api_base": "http://localhost:8000/api/v1",
+        "billing_url": "http://localhost:3000/settings/billing",
+    }
+    runtime_cfg_path.write_text(json.dumps(runtime_cfg, indent=2), encoding="utf-8")
+    _ok(f"Wrote {runtime_cfg_path.relative_to(DIST)}")
+
 
 def _print_summary():
     """Print next-step instructions."""
@@ -205,6 +216,12 @@ def _print_summary():
     print()
     print("  The installer will be written to  dist/WebcamGuardianSetup.exe")
     print()
+    print("  Demo mode options:")
+    print('    - Build-time: python build_executable.py --demo')
+    print('    - Build-time (dev alias): python build_executable.py --dev')
+    print('    - Runtime env: set POSTURE_DEMO_MODE=1 before launching PostureApp.exe')
+    print('    - Runtime env (dev alias): set POSTURE_DEV_MODE=1 before launching PostureApp.exe')
+    print()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -216,6 +233,8 @@ def main():
     parser.add_argument("--no-clean",  action="store_true", help="Skip cleaning previous build")
     parser.add_argument("--verbose",   action="store_true", help="Verbose PyInstaller output")
     parser.add_argument("--skip-icon", action="store_true", help="Skip icon conversion (use existing .ico)")
+    parser.add_argument("--demo",      action="store_true", help="Write runtime_config.json with demo_mode=true")
+    parser.add_argument("--dev",       action="store_true", help="Write runtime_config.json with dev_mode=true")
     args = parser.parse_args()
 
     print("\n\033[1;35m╔══════════════════════════════════════════╗")
@@ -235,7 +254,7 @@ def main():
         _clean()
 
     _run_pyinstaller(args.verbose)
-    _post_process()
+    _post_process(demo_mode=args.demo, dev_mode=args.dev)
     _print_summary()
 
 

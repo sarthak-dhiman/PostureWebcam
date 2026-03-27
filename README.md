@@ -477,6 +477,33 @@ pyinstaller PostureApp.spec
 
 Output: `dist/PostureApp/PostureApp.exe`
 
+### Demo build (env/config-driven)
+
+To package a demo that skips subscription verification checks without editing source files:
+
+```powershell
+python build_executable.py --demo
+# or dev alias
+python build_executable.py --dev
+```
+
+This writes `dist/PostureApp/data/runtime_config.json` with:
+
+```json
+{
+  "demo_mode": true
+}
+```
+
+You can also toggle at runtime using environment variables:
+
+- `POSTURE_DEMO_MODE=1`
+- `POSTURE_DEV_MODE=1` (alias; behaves like demo mode)
+- `POSTURE_API_BASE=http://.../api/v1`
+- `POSTURE_BILLING_URL=http://...`
+
+When `demo_mode` is enabled, subscription verification is forced to online and free-tier quota gating is disabled.
+
 ---
 
 ## Configuration
@@ -496,6 +523,17 @@ Output: `dist/PostureApp/PostureApp.exe`
 ```json
 {
   "focal_px": 620.5
+}
+```
+
+`data/runtime_config.json` — optional deployment-time overrides (especially useful for `.exe` builds):
+
+```json
+{
+  "demo_mode": false,
+  "dev_mode": false,
+  "api_base": "http://localhost:8000/api/v1",
+  "billing_url": "http://localhost:3000/settings/billing"
 }
 ```
 

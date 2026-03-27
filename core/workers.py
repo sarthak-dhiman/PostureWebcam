@@ -13,6 +13,7 @@ from PyQt6.QtCore import QThread, pyqtSignal, QTimer, QObject
 
 from core.constants import (
     SUBSCRIPTION_CHECK_INTERVAL_MS,
+    DEMO_MODE,
     API_VERIFY,
     API_LOGIN,
     API_GOOGLE_OAUTH,
@@ -224,6 +225,10 @@ class SubscriptionMonitor(QThread):
         """Verify subscription against the backend. No local fallback."""
         import urllib.request
         import urllib.error
+
+        if DEMO_MODE:
+            self.status_changed.emit("online", "Demo mode enabled — subscription checks are bypassed.")
+            return
 
         # Prefer the in-memory token passed at construction (avoids disk race
         # conditions and handles backends that use "access" instead of "token").
@@ -695,6 +700,10 @@ class QuotaFetchWorker(QThread):
     def run(self):
         import urllib.request
         import urllib.error
+        if DEMO_MODE:
+            # In demo builds we hide free-tier gating entirely.
+            self.quota_fetched.emit(0, False)
+            return
         try:
             req = urllib.request.Request(API_QUOTA, method="GET")
             req.add_header("Authorization", f"Bearer {self._token}")
@@ -741,6 +750,9 @@ class QuotaLogWorker(QThread):
     def run(self):
         import urllib.request
         import urllib.error
+        if DEMO_MODE:
+            # Nothing to log in demo mode; keep UI state unchanged.
+            return
         try:
             payload = json.dumps({"duration_seconds": self._duration}).encode("utf-8")
             req = urllib.request.Request(API_QUOTA_LOG, data=payload, method="POST")
