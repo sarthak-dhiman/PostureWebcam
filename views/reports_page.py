@@ -74,17 +74,20 @@ class ReportsPage(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("reportsRoot")
 
         # ── Runtime state ───────────────────────────────────────────
         self._samples: list[dict] = []
         self._live_good  = 0
         self._live_bad   = 0
         self._live_alerts = 0
+        self._live_bad_alert_armed = True
+        self._live_bad_alert_threshold = 30
         self._last_pdf_path: str | None = None
 
         # ── Outer layout ────────────────────────────────────────────
         root = QVBoxLayout(self)
-        root.setContentsMargins(32, 28, 32, 28)
+        root.setContentsMargins(36, 32, 36, 30)
         root.setSpacing(0)
 
         hdr = QLabel("Reports")
@@ -94,41 +97,44 @@ class ReportsPage(QWidget):
         sub = QLabel("Review your posture history and live session stats.")
         sub.setObjectName("pageSubheader")
         root.addWidget(sub)
-        root.addSpacing(20)
+        root.addSpacing(16)
+
+        intro = QLabel("Track posture quality trends, alerts, and session consistency.")
+        intro.setObjectName("heroSubtext")
+        root.addWidget(intro)
+        root.addSpacing(14)
+
+        # Top snapshot row (always visible, independent of selected tab)
+        snapshot_row = QHBoxLayout()
+        snapshot_row.setSpacing(12)
+        s1, self._top_score_val = _stat_card("Today Score", "—", "")
+        s2, self._top_time_val = _stat_card("Tracked Today", "0", "minutes")
+        s3, self._top_alerts_val = _stat_card("Alerts Today", "0", "events")
+        for c in (s1, s2, s3):
+            c.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            snapshot_row.addWidget(c)
+        root.addLayout(snapshot_row)
+        root.addSpacing(14)
 
         # ── Tabs ────────────────────────────────────────────────────
+        tabs_shell = QFrame()
+        tabs_shell.setObjectName("planCard")
+        tabs_shell_lay = QVBoxLayout(tabs_shell)
+        tabs_shell_lay.setContentsMargins(12, 12, 12, 12)
+        tabs_shell_lay.setSpacing(0)
+
         self._tabs = QTabWidget()
         self._tabs.setObjectName("reportsTabs")
-        self._tabs.setStyleSheet(f"""
-            QTabWidget::pane {{
-                border: 1px solid {C.BORDER_SUBTLE};
-                border-radius: 10px;
-                background: {C.BG_SECONDARY};
-            }}
-            QTabBar::tab {{
-                background: {C.BG_INPUT};
-                color: {C.TEXT_SECONDARY};
-                padding: 8px 24px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                margin-right: 4px;
-                font-size: 13px;
-                font-weight: 600;
-            }}
-            QTabBar::tab:selected {{
-                background: {C.BG_SECONDARY};
-                color: {C.TEXT_PRIMARY};
-                border-bottom: 2px solid {C.ACCENT_BLUE};
-            }}
-        """)
+        self._tabs.setDocumentMode(False)
+        self._tabs.setUsesScrollButtons(True)
 
-        self._tabs.addTab(self._build_daily_overview(), "Daily Overview")
-        self._tabs.addTab(self._build_deep_analytics(), "Deep Analytics")
-        self._tabs.addTab(self._build_monthly_report(), "Monthly Report")
-        self._tabs.addTab(self._build_export_pdf(), "Export PDF")
+        self._tabs.addTab(self._wrap_tab_page(self._build_daily_overview(), "daily"), "Daily Overview")
+        self._tabs.addTab(self._wrap_tab_page(self._build_deep_analytics(), "analytics"), "Deep Analytics")
+        self._tabs.addTab(self._wrap_tab_page(self._build_monthly_report(), "monthly"), "Monthly Report")
+        self._tabs.addTab(self._wrap_tab_page(self._build_export_pdf(), "export"), "Export PDF")
         self._tabs.currentChanged.connect(self._on_tab_changed)
-
-        root.addWidget(self._tabs, 1)
+        tabs_shell_lay.addWidget(self._tabs)
+        root.addWidget(tabs_shell, 1)
 
     # ── Page lifecycle ──────────────────────────────────────────────────
     def showEvent(self, event):
@@ -139,6 +145,22 @@ class ReportsPage(QWidget):
         self._refresh_from_db()
 
     # ── Builder helpers ─────────────────────────────────────────────────
+    def _wrap_tab_page(self, page: QWidget, key: str) -> QWidget:
+        """Use one consistent tab viewport path to avoid rendering glitches."""
+        shell = QFrame()
+        shell.setObjectName("reportsTabPageShell")
+        shell_lay = QVBoxLayout(shell)
+        shell_lay.setContentsMargins(0, 0, 0, 0)
+        shell_lay.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("reportsTabScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        page.setObjectName(f"reportsTabPage_{key}")
+        scroll.setWidget(page)
+        shell_lay.addWidget(scroll)
+        return shell
 
     def _build_daily_overview(self) -> QWidget:
         page = QWidget()
@@ -150,8 +172,9 @@ class ReportsPage(QWidget):
         self._live_banner = QLabel("No active session")
         self._live_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._live_banner.setStyleSheet(
-            f"font-size: 13px; font-weight: 600; padding: 8px 14px; "
-            f"background: {C.BG_INPUT}; border-radius: 8px; color: {C.TEXT_SECONDARY};"
+            f"font-size: 13px; font-weight: 700; padding: 8px 14px; "
+            f"background: {C.BG_SECONDARY}; border: 1px solid {C.BORDER_SUBTLE}; "
+            f"border-radius: 10px; color: {C.TEXT_SECONDARY};"
         )
         lay.addWidget(self._live_banner)
 
@@ -241,16 +264,7 @@ class ReportsPage(QWidget):
         lay.addLayout(gallery_row)
         lay.addSpacing(8)
 
-        # Wrap the daily overview page in a scroll area so long content
-        # (charts, gallery, table) can be scrolled on smaller windows.
-        container = QWidget()
-        container_lay = QVBoxLayout(container)
-        container_lay.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(page)
-        container_lay.addWidget(scroll)
-        return container
+        return page
 
     def _build_deep_analytics(self) -> QWidget:
         page = QWidget()
@@ -526,6 +540,9 @@ class ReportsPage(QWidget):
         self._bad_val.setText(str(bad))
         self._tracked_val.setText(str(mins))
         self._ratio_bar.setValue(int(pct))
+        self._top_score_val.setText(f"{pct:.0f}%" if total else "—")
+        self._top_time_val.setText(str(mins))
+        self._top_alerts_val.setText(str(bad))
 
         if peak is not None:
             am_pm = "am" if peak < 12 else "pm"
@@ -899,11 +916,21 @@ class ReportsPage(QWidget):
             self._live_good += 1
         elif label == "bad":
             self._live_bad += 1
+
+        bad_elapsed = int(sample.get("bad_streak_sec", 0) or 0)
+        if label != "bad":
+            self._live_bad_alert_armed = True
+        elif bad_elapsed < self._live_bad_alert_threshold:
+            self._live_bad_alert_armed = True
+        elif self._live_bad_alert_armed:
             self._live_alerts += 1
+            self._live_bad_alert_armed = False
 
         self._live_good_val.setText(str(self._live_good))
         self._live_bad_val.setText(str(self._live_bad))
         self._live_alert_val.setText(str(self._live_alerts))
+        # Keep top summary aligned with live alert progression during active sessions.
+        self._top_alerts_val.setText(str(max(self._live_alerts, self._live_bad)))
 
         if label == "good":
             color, text = C.ACCENT_EMERALD, "Good posture — keep it up!"

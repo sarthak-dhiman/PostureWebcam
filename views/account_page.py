@@ -20,11 +20,13 @@ _STARTUP_HIVE = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 def _startup_exe_cmd() -> str:
     """Build the command written to the Run registry key."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --minimized'
     pythonw = sys.executable.replace("python.exe", "pythonw.exe")
     if not os.path.exists(pythonw):
         pythonw = sys.executable
     script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py")
-    return f'"{pythonw}" "{script}"'
+    return f'"{pythonw}" "{script}" --minimized'
 
 
 def _is_startup_enabled() -> bool:
@@ -81,6 +83,10 @@ class AccountPage(QWidget):
         self._plan_status = "Active"
         self._user_email = ""
         self._next_billing = "—"
+        self._quick_alert = None
+        self._quick_sit = None
+        self._quick_eye = None
+        self._quick_notif = None
 
         # Scroll wrapper so the page doesn't clip on small windows
         scroll = QScrollArea(self)
@@ -94,7 +100,7 @@ class AccountPage(QWidget):
         inner = QWidget()
         scroll.setWidget(inner)
         root = QVBoxLayout(inner)
-        root.setContentsMargins(32, 28, 32, 28)
+        root.setContentsMargins(36, 32, 36, 30)
         root.setSpacing(0)
 
         hdr = QLabel("Account & Subscription")
@@ -104,7 +110,12 @@ class AccountPage(QWidget):
         sub = QLabel("Manage your plan, billing, and tracker settings.")
         sub.setObjectName("pageSubheader")
         root.addWidget(sub)
-        root.addSpacing(28)
+        root.addSpacing(14)
+
+        intro = QLabel("Control billing, tracker behavior, and reminder preferences.")
+        intro.setObjectName("heroSubtext")
+        root.addWidget(intro)
+        root.addSpacing(20)
 
         # ── Plan card ────────────────────────────────────────────────
         plan_card = QFrame()
@@ -159,7 +170,39 @@ class AccountPage(QWidget):
         btn_row.addStretch()
         plan_lay.addLayout(btn_row)
         self.logout_btn = logout_btn
-        root.addWidget(plan_card)
+        quick_card = QFrame()
+        quick_card.setObjectName("planCard")
+        quick_lay = QVBoxLayout(quick_card)
+        quick_lay.setContentsMargins(22, 22, 22, 22)
+        quick_lay.setSpacing(10)
+
+        q_title = QLabel("Tracking Defaults")
+        q_title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {C.TEXT_PRIMARY};")
+        quick_lay.addWidget(q_title)
+
+        q_sub = QLabel("A quick summary of your current reminders and notification behavior.")
+        q_sub.setStyleSheet(f"font-size: 12px; color: {C.TEXT_SECONDARY};")
+        q_sub.setWordWrap(True)
+        quick_lay.addWidget(q_sub)
+        quick_lay.addSpacing(6)
+
+        self._quick_alert = QLabel("Alert threshold: —")
+        self._quick_sit = QLabel("Sit reminder: —")
+        self._quick_eye = QLabel("Eye reminder: —")
+        self._quick_notif = QLabel("Notifications: —")
+        for lbl in (self._quick_alert, self._quick_sit, self._quick_eye, self._quick_notif):
+            lbl.setStyleSheet(
+                f"background: {C.BG_INPUT}; border: 1px solid {C.BORDER_SUBTLE}; "
+                f"border-radius: 8px; padding: 8px 10px; font-size: 12px; color: {C.TEXT_PRIMARY};"
+            )
+            quick_lay.addWidget(lbl)
+        quick_lay.addStretch()
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(16)
+        top_row.addWidget(plan_card, 3)
+        top_row.addWidget(quick_card, 2)
+        root.addLayout(top_row)
         root.addSpacing(24)
 
         # ── Tracker Settings card ────────────────────────────────────
@@ -170,7 +213,8 @@ class AccountPage(QWidget):
         s_lay.setSpacing(16)
 
         s_title = QLabel("Tracker Settings")
-        s_title.setStyleSheet(f"font-size: 17px; font-weight: 700; color: {C.TEXT_PRIMARY};")
+        s_title.setObjectName("pageSubheader")
+        s_title.setStyleSheet(f"font-size: 16px; font-weight: 700; color: {C.TEXT_PRIMARY};")
         s_lay.addWidget(s_title)
 
         cfg = _load_config()
@@ -278,6 +322,7 @@ class AccountPage(QWidget):
 
         root.addWidget(settings_card)
         root.addStretch()
+        self._refresh_quick_settings_summary()
 
     # ── Public setters ──────────────────────────────────────────────────
     def set_user(self, email: str, plan: str = "Solo"):
@@ -330,7 +375,19 @@ class AccountPage(QWidget):
             "eye_break_interval_min": self._eye_spin.value(),
         }
         _save_config(cfg)
+        self._refresh_quick_settings_summary()
         self.settings_changed.emit()
+
+    def _refresh_quick_settings_summary(self):
+        if self._quick_alert is None:
+            return
+        notif_txt = "Enabled" if self._notif_check.isChecked() else "Disabled"
+        if self._sound_check.isChecked():
+            notif_txt += " + sound"
+        self._quick_alert.setText(f"Alert threshold: {self._alert_spin.value()} sec")
+        self._quick_sit.setText(f"Sit reminder: every {self._sit_spin.value()} min")
+        self._quick_eye.setText(f"Eye reminder: every {self._eye_spin.value()} min")
+        self._quick_notif.setText(f"Notifications: {notif_txt}")
 
     def _toggle_startup(self):
         _set_startup(self._startup_check.isChecked())

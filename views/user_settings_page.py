@@ -25,23 +25,24 @@ class UserSettingsPage(QWidget):
         super().__init__(parent)
 
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(32, 24, 32, 24)
+        outer.setSpacing(24)
         outer.addStretch()
 
         card = QFrame()
         card.setObjectName("authCard")
-        card.setFixedWidth(460)
+        card.setFixedWidth(500)
         lay = QVBoxLayout(card)
-        lay.setContentsMargins(36, 44, 36, 40)
+        lay.setContentsMargins(36, 38, 36, 34)
         lay.setSpacing(0)
 
-        title = QLabel("Your Account")
+        title = QLabel("Set Up Your Workspace")
         title.setObjectName("authTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title)
         lay.addSpacing(6)
 
-        sub = QLabel("Manage your personal settings and preferences.")
+        sub = QLabel("Continue solo or connect your organisation to unlock shared tracking insights.")
         sub.setObjectName("authSubtitle")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub.setWordWrap(True)
@@ -50,7 +51,7 @@ class UserSettingsPage(QWidget):
 
         # Display name
         self._display_name = QLineEdit()
-        self._display_name.setPlaceholderText("Display name")
+        self._display_name.setPlaceholderText("Display name (optional)")
         lay.addWidget(self._display_name)
         lay.addSpacing(8)
 
@@ -58,7 +59,7 @@ class UserSettingsPage(QWidget):
         lay.addSpacing(18)
 
         # Primary action — continue without an org
-        solo_btn = QPushButton("Continue as Solo User")
+        solo_btn = QPushButton("Continue with Personal Workspace")
         solo_btn.setObjectName("primaryBtn")
         solo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         solo_btn.clicked.connect(lambda: self.solo_continue.emit())
@@ -66,7 +67,7 @@ class UserSettingsPage(QWidget):
         lay.addSpacing(10)
 
         # Secondary action — join an organisation
-        join_btn = QPushButton("Join an organization")
+        join_btn = QPushButton("Join an Organisation")
         join_btn.setObjectName("secondaryBtn")
         join_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         join_btn.clicked.connect(lambda: self.go_to_join.emit())

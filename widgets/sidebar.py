@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QIcon
 
-from core.constants import C, SIDEBAR_WIDTH, PAGE_DASHBOARD, PAGE_REPORTS, PAGE_ACCOUNT
+from core.constants import APP_NAME, SIDEBAR_WIDTH, PAGE_DASHBOARD, PAGE_REPORTS, PAGE_ACCOUNT
 from core.icons import icon
 
 
@@ -39,21 +39,29 @@ class Sidebar(QFrame):
         self._current_index = PAGE_DASHBOARD
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 24, 14, 18)
+        root.setContentsMargins(16, 18, 16, 18)
         root.setSpacing(0)
 
         # ── Brand ────────────────────────────────────────────────────
-        brand = QLabel("Posture Webcam\nAnalyzer")
+        brand = QLabel(APP_NAME)
         brand.setObjectName("sidebarBrand")
         brand.setWordWrap(True)
         root.addWidget(brand)
-        root.addSpacing(4)
+        tagline = QLabel("Live posture insights")
+        tagline.setObjectName("sidebarTagline")
+        root.addWidget(tagline)
+        root.addSpacing(6)
 
         self._email_label = QLabel("")
         self._email_label.setObjectName("sidebarEmail")
         root.addWidget(self._email_label)
 
-        root.addSpacing(28)
+        root.addSpacing(22)
+
+        section_lbl = QLabel("WORKSPACE")
+        section_lbl.setObjectName("sidebarTagline")
+        root.addWidget(section_lbl)
+        root.addSpacing(10)
 
         # ── Nav buttons ──────────────────────────────────────────────
         for icon_name, label, page_idx in self._NAV_ITEMS:
@@ -63,12 +71,17 @@ class Sidebar(QFrame):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda checked, idx=page_idx: self._on_nav(idx))
             root.addWidget(btn)
-            root.addSpacing(4)
+            root.addSpacing(6)
             self._buttons.append(btn)
 
         root.addStretch()
 
         # ── Subscription LED row ─────────────────────────────────────
+        foot_sep = QFrame()
+        foot_sep.setObjectName("hDivider")
+        root.addWidget(foot_sep)
+        root.addSpacing(12)
+
         led_row = QHBoxLayout()
         led_row.setSpacing(8)
 
@@ -79,6 +92,7 @@ class Sidebar(QFrame):
 
         self._status_text = QLabel("Checking...")
         self._status_text.setObjectName("sidebarEmail")
+        self._status_text.setStyleSheet("font-size: 10px;")
         self._status_text.setWordWrap(True)
         led_row.addWidget(self._status_text, 1)
 

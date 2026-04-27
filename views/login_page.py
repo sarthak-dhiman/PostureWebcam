@@ -10,7 +10,7 @@ from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtCore import QUrl
 
-from core.constants import C, APP_NAME
+from core.constants import C, APP_NAME, WEB_BASE_URL, SIGNUP_URL, PRIVACY_URL, TERMS_URL
 from core.icons import icon
 from core.workers import LoginWorker
 from core.workers import OAuthInitWorker, OAuthPollWorker
@@ -31,15 +31,45 @@ class LoginPage(QWidget):
         self._worker: LoginWorker | None = None
 
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addStretch()
+        outer.setContentsMargins(32, 24, 32, 24)
+        outer.setSpacing(24)
+        outer.addStretch(1)
+
+        aside = QFrame()
+        aside.setObjectName("authAside")
+        aside.setFixedWidth(360)
+        aside_lay = QVBoxLayout(aside)
+        aside_lay.setContentsMargins(28, 30, 28, 30)
+        aside_lay.setSpacing(14)
+
+        aside_title = QLabel("Posture intelligence for focused work")
+        aside_title.setObjectName("authAsideTitle")
+        aside_title.setWordWrap(True)
+        aside_lay.addWidget(aside_title)
+
+        aside_body = QLabel(
+            "Track posture in real time, get gentle corrective nudges, and review"
+            " daily consistency without disrupting your flow."
+        )
+        aside_body.setObjectName("authAsideBody")
+        aside_body.setWordWrap(True)
+        aside_lay.addWidget(aside_body)
+        aside_lay.addSpacing(8)
+
+        for pill in ("Real-time form detection", "Low-noise desktop alerts", "Session and trend reports"):
+            lbl = QLabel(pill)
+            lbl.setObjectName("authPill")
+            aside_lay.addWidget(lbl)
+
+        aside_lay.addStretch()
+        outer.addWidget(aside, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # ── Card ────────────────────────────────────────────────────
         card = QFrame()
         card.setObjectName("authCard")
-        card.setFixedWidth(420)
+        card.setFixedWidth(460)
         card_lay = QVBoxLayout(card)
-        card_lay.setContentsMargins(36, 44, 36, 40)
+        card_lay.setContentsMargins(36, 40, 36, 36)
         card_lay.setSpacing(0)
 
         # Title
@@ -53,7 +83,7 @@ class LoginPage(QWidget):
         subtitle.setObjectName("authSubtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_lay.addWidget(subtitle)
-        card_lay.addSpacing(28)
+        card_lay.addSpacing(24)
 
         # Email
         self._email = QLineEdit()
@@ -74,7 +104,7 @@ class LoginPage(QWidget):
         self._error.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._error.setVisible(False)
         card_lay.addWidget(self._error)
-        card_lay.addSpacing(18)
+        card_lay.addSpacing(16)
 
         # Login button
         self._login_btn = QPushButton("Sign In")
@@ -82,7 +112,7 @@ class LoginPage(QWidget):
         self._login_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._login_btn.clicked.connect(self._on_login_clicked)
         card_lay.addWidget(self._login_btn)
-        card_lay.addSpacing(16)
+        card_lay.addSpacing(14)
 
         # ── Divider ─────────────────────────────────────────────────
         div_row = QHBoxLayout()
@@ -96,7 +126,7 @@ class LoginPage(QWidget):
         div_row.addWidget(or_lbl)
         div_row.addWidget(line_r, 1)
         card_lay.addLayout(div_row)
-        card_lay.addSpacing(16)
+        card_lay.addSpacing(14)
 
         # Google button
         self._google_btn = QPushButton("  Sign in with Google")
@@ -117,14 +147,14 @@ class LoginPage(QWidget):
         signup_btn = QPushButton("Sign up")
         signup_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         signup_btn.setObjectName("linkBtn")
-        signup_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("http://localhost:3000/signup")))
+        signup_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(SIGNUP_URL)))
         signup_row.addWidget(signup_btn)
         signup_row.addStretch()
         card_lay.addLayout(signup_row)
         card_lay.addSpacing(12)
 
         # Footer links (includes app name)
-        links = QLabel(f'<a href="http://localhost:3000">{APP_NAME}</a> • <a href="http://localhost:3000/privacy">Privacy</a> • <a href="http://localhost:3000/terms">Terms</a>')
+        links = QLabel(f'<a href="{WEB_BASE_URL}">{APP_NAME}</a> • <a href="{PRIVACY_URL}">Privacy</a> • <a href="{TERMS_URL}">Terms</a>')
         links.setObjectName("mutedText")
         links.setAlignment(Qt.AlignmentFlag.AlignCenter)
         links.setOpenExternalLinks(True)
@@ -137,7 +167,7 @@ class LoginPage(QWidget):
         col.addStretch()
 
         outer.addLayout(col, 0)
-        outer.addStretch()
+        outer.addStretch(1)
 
         # Allow Enter key to submit
         self._password.returnPressed.connect(self._on_login_clicked)

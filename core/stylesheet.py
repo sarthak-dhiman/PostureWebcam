@@ -20,6 +20,24 @@ def build_stylesheet() -> str:
     QMainWindow, QWidget#centralRoot {{
         background-color: {C.BG_PRIMARY};
     }}
+    QWidget#reportsRoot {{
+        background-color: {C.BG_PRIMARY};
+    }}
+    QFrame#reportsTabPageShell,
+    QScrollArea#reportsTabScroll,
+    QWidget#reportsTabPage_daily,
+    QWidget#reportsTabPage_analytics,
+    QWidget#reportsTabPage_monthly,
+    QWidget#reportsTabPage_export {{
+        background-color: {C.BG_SECONDARY};
+    }}
+    QScrollArea#reportsTabScroll > QWidget > QWidget {{
+        background-color: {C.BG_SECONDARY};
+        border: none;
+    }}
+    QLabel {{
+        letter-spacing: 0.1px;
+    }}
 
     QToolTip {{
         background-color: {C.BG_SECONDARY};
@@ -54,33 +72,43 @@ def build_stylesheet() -> str:
        ================================================================ */
     QFrame#sidebar {{
         background-color: {C.BG_SIDEBAR};
+        border: none;
         border-right: 1px solid {C.BORDER_SUBTLE};
+        border-left: none;
     }}
 
     QPushButton.nav-btn {{
         background: transparent;
         color: {C.TEXT_SECONDARY};
         text-align: left;
-        padding: 12px 18px;
+        padding: 12px 14px;
         border: none;
         border-radius: 10px;
         font-size: 13px;
-        font-weight: 500;
+        font-weight: 600;
     }}
     QPushButton.nav-btn:hover {{
-        background-color: {C.BG_HOVER};
+        background-color: #E4DCF9;
         color: {C.TEXT_PRIMARY};
     }}
     QPushButton.nav-btn[active="true"] {{
-        background-color: {C.BG_HOVER};
-        color: {C.ACCENT_BLUE};
+        background-color: #DCD3F8;
+        color: #5B21B6;
         font-weight: 600;
+        border: 1px solid #CFC4F6;
     }}
 
     QLabel#sidebarBrand {{
         font-size: 15px;
         font-weight: 700;
         color: {C.TEXT_PRIMARY};
+        letter-spacing: 0.1px;
+        padding: 0;
+    }}
+    QLabel#sidebarTagline {{
+        font-size: 11px;
+        font-weight: 500;
+        color: {C.TEXT_DISABLED};
         padding: 0;
     }}
     QLabel#sidebarEmail {{
@@ -114,11 +142,11 @@ def build_stylesheet() -> str:
     QPushButton#primaryBtn {{
         background-color: {C.ACCENT_BLUE};
         color: {C.WHITE};
-        border: none;
-        border-radius: 10px;
-        padding: 13px 0;
+        border: 1px solid {C.ACCENT_BLUE};
+        border-radius: 12px;
+        padding: 12px 0;
         font-size: 14px;
-        font-weight: 600;
+        font-weight: 700;
     }}
     QPushButton#primaryBtn:hover {{
         background-color: {C.ACCENT_BLUE_HV};
@@ -132,11 +160,11 @@ def build_stylesheet() -> str:
     }}
 
     QPushButton#secondaryBtn {{
-        background-color: {C.BG_INPUT};
+        background-color: {C.BG_SECONDARY};
         color: {C.TEXT_PRIMARY};
-        border: 2px solid {C.BORDER_SUBTLE};
-        border-radius: 10px;
-        padding: 13px 0;
+        border: 1px solid {C.BORDER_SUBTLE};
+        border-radius: 12px;
+        padding: 12px 0;
         font-size: 14px;
         font-weight: 500;
     }}
@@ -148,9 +176,9 @@ def build_stylesheet() -> str:
     QPushButton#dangerBtn {{
         background-color: transparent;
         color: {C.ACCENT_RED};
-        border: 2px solid {C.ACCENT_RED};
-        border-radius: 10px;
-        padding: 13px 0;
+        border: 1px solid {C.ACCENT_RED};
+        border-radius: 12px;
+        padding: 12px 0;
         font-size: 14px;
         font-weight: 500;
     }}
@@ -174,9 +202,9 @@ def build_stylesheet() -> str:
 
     QPushButton#toggleBtn {{
         background-color: {C.ACCENT_EMERALD};
-        color: {C.BG_PRIMARY};
-        border: none;
-        border-radius: 10px;
+        color: {C.WHITE};
+        border: 1px solid {C.ACCENT_EMERALD};
+        border-radius: 14px;
         padding: 14px 32px;
         font-size: 15px;
         font-weight: 700;
@@ -222,7 +250,12 @@ def build_stylesheet() -> str:
     QFrame#authCard {{
         background-color: {C.BG_SECONDARY};
         border: 1px solid {C.BORDER_SUBTLE};
-        border-radius: 18px;
+        border-radius: 20px;
+    }}
+    QFrame#authAside {{
+        background-color: {C.BG_SECONDARY};
+        border: 1px solid {C.BORDER_SUBTLE};
+        border-radius: 20px;
     }}
 
     QLabel#authTitle {{
@@ -234,6 +267,25 @@ def build_stylesheet() -> str:
         font-size: 13px;
         color: {C.TEXT_SECONDARY};
     }}
+    QLabel#authAsideTitle {{
+        font-size: 22px;
+        font-weight: 700;
+        color: {C.TEXT_PRIMARY};
+    }}
+    QLabel#authAsideBody {{
+        font-size: 13px;
+        color: {C.TEXT_SECONDARY};
+        line-height: 1.4;
+    }}
+    QLabel#authPill {{
+        background: {C.BG_INPUT};
+        border: 1px solid {C.BORDER_SUBTLE};
+        border-radius: 10px;
+        padding: 8px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        color: {C.TEXT_PRIMARY};
+    }}
     QLabel#errorLabel {{
         font-size: 12px;
         color: {C.ACCENT_RED};
@@ -242,6 +294,35 @@ def build_stylesheet() -> str:
     QLabel#dividerText {{
         font-size: 12px;
         color: {C.TEXT_DISABLED};
+    }}
+    QLabel#mutedText {{
+        font-size: 12px;
+        color: {C.TEXT_SECONDARY};
+    }}
+    QPushButton#linkBtn {{
+        background: transparent;
+        border: none;
+        color: {C.ACCENT_BLUE};
+        font-size: 12px;
+        font-weight: 600;
+        padding: 0;
+    }}
+    QPushButton#linkBtn:hover {{
+        color: {C.ACCENT_BLUE_HV};
+        text-decoration: underline;
+    }}
+    QPushButton#backButton {{
+        background: {C.BG_INPUT};
+        border: 1px solid {C.BORDER_SUBTLE};
+        border-radius: 10px;
+        color: {C.TEXT_SECONDARY};
+        padding: 6px 10px;
+        font-size: 12px;
+        font-weight: 600;
+    }}
+    QPushButton#backButton:hover {{
+        border-color: {C.BORDER_FOCUS};
+        color: {C.TEXT_PRIMARY};
     }}
 
     /* ================================================================
@@ -280,9 +361,27 @@ def build_stylesheet() -> str:
         border: 1px solid {C.BORDER_SUBTLE};
         border-radius: 16px;
     }}
+    QFrame#heroPanel {{
+        background: qlineargradient(
+            x1: 0, y1: 0, x2: 1, y2: 1,
+            stop: 0 rgba(124, 58, 237, 22),
+            stop: 1 rgba(99, 102, 241, 14)
+        );
+        border: 1px solid {C.BORDER_SUBTLE};
+        border-radius: 14px;
+    }}
+    QLabel#heroTitle {{
+        font-size: 16px;
+        font-weight: 700;
+        color: {C.TEXT_PRIMARY};
+    }}
+    QLabel#heroSubtext {{
+        font-size: 12px;
+        color: {C.TEXT_SECONDARY};
+    }}
     QLabel#planBadge {{
         background-color: {C.ACCENT_EMERALD};
-        color: {C.BG_PRIMARY};
+        color: {C.WHITE};
         font-size: 11px;
         font-weight: 700;
         border-radius: 8px;
@@ -309,22 +408,113 @@ def build_stylesheet() -> str:
        WEBCAM PLACEHOLDER
        ================================================================ */
     QFrame#webcamPlaceholder {{
-        background-color: #000000;
-        border: 2px dashed {C.BORDER_SUBTLE};
+        background-color: #07090F;
+        border: 1px dashed {C.BORDER_SUBTLE};
         border-radius: 14px;
+    }}
+
+    QLabel#statusBar {{
+        background: #E8EDF5;
+        border: 1px solid #CED7E5;
+        border-radius: 10px;
+        padding: 8px 14px;
+        font-size: 13px;
+        font-weight: 700;
+    }}
+    QLabel#quotaBar {{
+        background: #E8EDF5;
+        border: 1px solid #CED7E5;
+        border-radius: 10px;
+        padding: 6px 14px;
+        font-size: 12px;
+        font-weight: 700;
+    }}
+
+    QTabWidget#reportsTabs::pane {{
+        border: 1px solid {C.BORDER_SUBTLE};
+        border-radius: 12px;
+        background: {C.BG_SECONDARY};
+        top: 0px;
+        margin-top: 0px;
+    }}
+    QTabWidget#reportsTabs QTabBar::tab {{
+        background: {C.BG_INPUT};
+        color: {C.TEXT_SECONDARY};
+        padding: 10px 20px;
+        border-top-left-radius: 10px;
+        border-top-right-radius: 10px;
+        margin-right: 4px;
+        font-size: 12px;
+        font-weight: 700;
+        border: 1px solid {C.BORDER_SUBTLE};
+        border-bottom: 1px solid {C.BORDER_SUBTLE};
+    }}
+    QTabWidget#reportsTabs QTabBar::tab:selected {{
+        background: {C.BG_SECONDARY};
+        color: {C.TEXT_PRIMARY};
+        border-color: {C.BORDER_SUBTLE};
+        border-bottom: 1px solid {C.BG_SECONDARY};
+    }}
+    QTabWidget#reportsTabs QTabBar::tab:hover {{
+        color: {C.TEXT_PRIMARY};
+    }}
+
+    QComboBox, QSpinBox {{
+        background-color: {C.BG_INPUT};
+        color: {C.TEXT_PRIMARY};
+        border: 1px solid {C.BORDER_SUBTLE};
+        border-radius: 8px;
+        padding: 5px 10px;
+        font-size: 13px;
+    }}
+    QComboBox:hover, QSpinBox:hover {{
+        border-color: {C.BORDER_FOCUS};
+    }}
+    QComboBox:focus, QSpinBox:focus {{
+        border-color: {C.BORDER_FOCUS};
+    }}
+
+    QCheckBox {{
+        spacing: 6px;
+    }}
+    QCheckBox::indicator {{
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+        border: 1px solid {C.BORDER_SUBTLE};
+        background: {C.BG_INPUT};
+    }}
+    QCheckBox::indicator:checked {{
+        border: 1px solid {C.ACCENT_BLUE};
+        background: {C.ACCENT_BLUE};
+    }}
+
+    QProgressBar {{
+        background: {C.BG_INPUT};
+        border: 1px solid {C.BORDER_SUBTLE};
+        border-radius: 8px;
+        text-align: center;
+        font-size: 12px;
+        color: {C.TEXT_PRIMARY};
+        padding: 1px;
+    }}
+    QProgressBar::chunk {{
+        border-radius: 7px;
     }}
 
     /* ================================================================
        PAGE HEADER
        ================================================================ */
     QLabel#pageHeader {{
-        font-size: 22px;
+        font-size: 24px;
         font-weight: 700;
         color: {C.TEXT_PRIMARY};
+        letter-spacing: -0.3px;
     }}
     QLabel#pageSubheader {{
         font-size: 13px;
         color: {C.TEXT_SECONDARY};
+        font-weight: 400;
     }}
 
     /* ================================================================

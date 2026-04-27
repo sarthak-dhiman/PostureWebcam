@@ -64,25 +64,25 @@ _ENSURE_DIRS = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _step(msg: str):
-    print(f"\n\033[1;36m» {msg}\033[0m")
+    print(f"\n\033[1;36m>> {msg}\033[0m")
 
 
 def _ok(msg: str):
-    print(f"  \033[32m✔  {msg}\033[0m")
+    print(f"  \033[32m[OK] {msg}\033[0m")
 
 
 def _warn(msg: str):
-    print(f"  \033[33m⚠  {msg}\033[0m")
+    print(f"  \033[33m[WARN] {msg}\033[0m")
 
 
 def _fail(msg: str):
-    print(f"  \033[31m✘  {msg}\033[0m")
+    print(f"  \033[31m[FAIL] {msg}\033[0m")
     sys.exit(1)
 
 
 def _convert_icon():
     """Convert office.png to office.ico (multi-size) using Pillow."""
-    _step("Converting office.png → office.ico")
+    _step("Converting office.png to office.ico")
     if not PNG.exists():
         _fail(f"office.png not found at {PNG}")
     try:
@@ -130,7 +130,7 @@ def _clean():
 
 def _run_pyinstaller(verbose: bool):
     """Run PyInstaller with the spec file."""
-    _step("Running PyInstaller (this takes a few minutes…)")
+    _step("Running PyInstaller (this takes a few minutes)")
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
@@ -147,7 +147,13 @@ def _run_pyinstaller(verbose: bool):
     _ok("PyInstaller finished successfully")
 
 
-def _post_process(demo_mode: bool = False, dev_mode: bool = False):
+def _post_process(
+    demo_mode: bool = False,
+    dev_mode: bool = False,
+    api_base: str = "http://localhost:8000/api/v1",
+    billing_url: str = "http://localhost:3000/settings/billing",
+    web_base_url: str = "http://localhost:3000",
+):
     """Clean sensitive files and ensure required dirs exist in the dist."""
     _step("Post-processing dist/PostureApp/")
 
@@ -192,8 +198,9 @@ def _post_process(demo_mode: bool = False, dev_mode: bool = False):
     runtime_cfg = {
         "demo_mode": bool(demo_mode),
         "dev_mode": bool(dev_mode),
-        "api_base": "http://localhost:8000/api/v1",
-        "billing_url": "http://localhost:3000/settings/billing",
+        "api_base": api_base,
+        "billing_url": billing_url,
+        "web_base_url": web_base_url,
     }
     runtime_cfg_path.write_text(json.dumps(runtime_cfg, indent=2), encoding="utf-8")
     _ok(f"Wrote {runtime_cfg_path.relative_to(DIST)}")
@@ -206,7 +213,7 @@ def _print_summary():
     print("  Output directory:")
     print(f"    {DIST}")
     print()
-    print("  ── Next step: Inno Setup ─────────────────────────────────────")
+    print("  -- Next step: Inno Setup -------------------------------------")
     print("  1. Install Inno Setup 6  (https://jrsoftware.org/isinfo.php)")
     print("  2. Open webcam_guardian_setup.iss in the Inno Setup IDE,")
     print("     or compile from the command line:")
@@ -235,11 +242,26 @@ def main():
     parser.add_argument("--skip-icon", action="store_true", help="Skip icon conversion (use existing .ico)")
     parser.add_argument("--demo",      action="store_true", help="Write runtime_config.json with demo_mode=true")
     parser.add_argument("--dev",       action="store_true", help="Write runtime_config.json with dev_mode=true")
+    parser.add_argument(
+        "--api-base",
+        default="https://postureos.onrender.com/api/v1",
+        help="API base URL written to dist/data/runtime_config.json",
+    )
+    parser.add_argument(
+        "--billing-url",
+        default="https://postureos.onrender.com/settings/billing",
+        help="Billing URL written to dist/data/runtime_config.json",
+    )
+    parser.add_argument(
+        "--web-base-url",
+        default="https://postureos.onrender.com",
+        help="Website base URL used for signup/privacy/terms in packaged builds",
+    )
     args = parser.parse_args()
 
-    print("\n\033[1;35m╔══════════════════════════════════════════╗")
-    print("║   Posture App — Windows Build Pipeline   ║")
-    print("╚══════════════════════════════════════════╝\033[0m")
+    print("\n\033[1;35m+------------------------------------------+")
+    print("|   Posture App - Windows Build Pipeline   |")
+    print("+------------------------------------------+\033[0m")
 
     if not args.skip_icon:
         _convert_icon()
@@ -254,7 +276,13 @@ def main():
         _clean()
 
     _run_pyinstaller(args.verbose)
-    _post_process(demo_mode=args.demo, dev_mode=args.dev)
+    _post_process(
+        demo_mode=args.demo,
+        dev_mode=args.dev,
+        api_base=args.api_base,
+        billing_url=args.billing_url,
+        web_base_url=args.web_base_url,
+    )
     _print_summary()
 
 

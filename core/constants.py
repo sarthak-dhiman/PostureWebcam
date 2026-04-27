@@ -61,6 +61,14 @@ BILLING_URL = (
     or _RUNTIME_CONFIG.get("billing_url")
     or "http://localhost:3000/settings/billing"
 )
+WEB_BASE_URL = (
+    os.getenv("POSTURE_WEB_BASE_URL")
+    or _RUNTIME_CONFIG.get("web_base_url")
+    or "http://localhost:3000"
+)
+SIGNUP_URL = f"{WEB_BASE_URL}/signup"
+PRIVACY_URL = f"{WEB_BASE_URL}/privacy"
+TERMS_URL = f"{WEB_BASE_URL}/terms"
 DEV_MODE = _bool_from_any(
     os.getenv("POSTURE_DEV_MODE", _RUNTIME_CONFIG.get("dev_mode", False)),
     default=False,
@@ -77,30 +85,33 @@ LOGIN_MOCK_DELAY_S = 1.5
 # ── Colour palette ──────────────────────────────────────────────────────────
 class C:
     """Colour tokens used in both QSS and programmatic painting."""
-    BG_PRIMARY      = "#0F1117"
-    BG_SECONDARY    = "#1A1D27"
-    BG_SIDEBAR      = "#141620"
-    BG_INPUT        = "#232636"
-    BG_HOVER        = "#2A2E3F"
+    BG_PRIMARY      = "#E7ECF4"
+    BG_SECONDARY    = "#F2F5FA"
+    BG_SIDEBAR      = "#EDF2F8"
+    BG_INPUT        = "#E3E9F2"
+    BG_HOVER        = "#E0E7F3"
 
-    BORDER_SUBTLE   = "#2E3348"
-    BORDER_FOCUS    = "#4F8CFF"
+    BORDER_SUBTLE   = "#C9D3E1"
+    BORDER_FOCUS    = "#8B5CF6"
 
-    TEXT_PRIMARY    = "#E8ECF4"
-    TEXT_SECONDARY  = "#8B92A8"
-    TEXT_DISABLED   = "#4A5068"
+    TEXT_PRIMARY    = "#0F172A"
+    TEXT_SECONDARY  = "#334155"
+    TEXT_DISABLED   = "#64748B"
 
-    ACCENT_BLUE     = "#4F8CFF"
-    ACCENT_BLUE_HV  = "#6DA1FF"
-    ACCENT_EMERALD  = "#34D399"
-    ACCENT_AMBER    = "#FBBF24"
-    ACCENT_RED      = "#F87171"
+    ACCENT_BLUE     = "#7C3AED"
+    ACCENT_BLUE_HV  = "#6D28D9"
+    ACCENT_EMERALD  = "#10B981"
+    ACCENT_AMBER    = "#F59E0B"
+    ACCENT_RED      = "#EF4444"
 
     WHITE           = "#FFFFFF"
     TRANSPARENT     = "transparent"
 
+    SPLASH_ACCENT   = "#5B8CFF"
+    SPLASH_MUTED    = "#8E96AB"
+
 # ── Sidebar geometry ─────────────────────────────────────────────────────────
-SIDEBAR_WIDTH = 220
+SIDEBAR_WIDTH = 232
 
 # ── Page indices (inside QStackedWidget) ─────────────────────────────────────
 PAGE_LOGIN      = 0

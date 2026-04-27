@@ -114,7 +114,7 @@ Posture App/
 │   ├── constants.py         # API URLs, app name, timing constants
 │   ├── workers.py           # QThread workers: LoginWorker, SubscriptionMonitor, OAuthInitWorker
 │   ├── icons.py             # SVG/icon helpers
-│   └── stylesheet.py        # Global Qt stylesheet (dark theme)
+│   └── stylesheet.py        # Global Qt stylesheet + design tokens
 │
 ├── views/
 │   ├── login_page.py        # Login form + Google OAuth button
@@ -189,7 +189,7 @@ Before any posture analysis, the frame is checked against the registered owner f
   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ]  ← 14 zero-padded
 ```
 
-Output: softmax over `[Good, Bad]`. If confidence ≥ `0.65` (`ONNX_CONF_THRESHOLD`), the label is accepted. Otherwise the heuristic fallback runs.
+Output: softmax over `[Good, Bad]`. If confidence ≥ `0.62` (`ONNX_CONF_THRESHOLD`), the label is accepted. Otherwise the heuristic fallback runs.
 
 ---
 
@@ -204,13 +204,15 @@ Six independent checks, all using normalised coordinates divided by shoulder wid
 | **Shoulder roll (tilt angle)** | `atan2(Δy, Δx)` of shoulder line | > `8.0°` |
 | **Shoulder depth asymmetry (Z)** | `|left_sho_z − right_sho_z|` | > `0.06` |
 | **Lateral head tilt** | Ear-to-ear line angle | > `12.0°` |
-| **Torso lean-back** | `mid_shoulder_z − mid_hip_z` | > `0.10` |
+| **Torso lean-back (depth)** | `mid_shoulder_z − mid_hip_z` | > `0.07` |
+| **Torso lean-back (2D backup)** | `ear_sho_ratio_current − ear_sho_ratio_reference` | > `0.09` |
 
 Any single flag → `bad` posture. Additionally:
 
 - **Chin-forward (Z-axis):** `mid_shoulder_z − nose_z > CHIN_FORWARD_Z_THRESHOLD` flags head protrusion.
 - **Forward-head angle override:** If the estimated forward-head angle ≤ 3°, the verdict is forced to `good`.
 - **Head tilt override:** A flagged lateral tilt always overrides a `good` verdict back to `bad`.
+- **Lean-back override:** Reclined torso detection also overrides a `good` verdict back to `bad`.
 
 ---
 
@@ -226,7 +228,7 @@ Where $R_{ref}$ is the ear-to-shoulder ratio captured once at first owner verifi
 
 ### Stage 6 — Temporal Smoothing
 
-A sliding deque of the last **3 frames** (`LABEL_SMOOTH_WINDOW`) takes a **majority vote** between `good` / `bad` labels to suppress per-frame noise before the final verdict is committed.
+A sliding deque of the last **5 frames** (`LABEL_SMOOTH_WINDOW`) takes a **majority vote** between `good` / `bad` labels to suppress per-frame noise before the final verdict is committed.
 
 ---
 
@@ -248,7 +250,7 @@ The desktop app is designed to work against a production REST API. During develo
 
 ```
 Development:  http://localhost:8000/api/v1
-Production:   set API_BASE in core/constants.py
+Production:   set POSTURE_API_BASE or data/runtime_config.json "api_base" (see Configuration)
 ```
 
 ### Authentication Flow
@@ -375,9 +377,9 @@ Built with **PyQt6**, using a `QStackedWidget` to switch between pages:
 |-------|------|---------|
 | 0 | `LoginPage` | Email/password login + Google OAuth + signup link |
 | 1 | `JoinOrgPage` | Enter an organisation invite code (shown on first login) |
-| 2 | `DashboardPage` | Live posture feed, KPI cards, distance dial, MJPEG preview |
-| 3 | `ReportsPage` | Historical charts (daily/monthly), export to PDF/text |
-| 4 | `AccountPage` | Subscription status, billing link, log out |
+| 2 | `DashboardPage` | Split layout: live camera/status panel + session summary + reminder dials |
+| 3 | `ReportsPage` | Top daily snapshot cards + tabbed analytics/monthly/export workflows |
+| 4 | `AccountPage` | Subscription management + tracker defaults summary + settings |
 
 The `Sidebar` widget shows the logged-in email, a subscription status LED (green/orange/red), and navigation buttons.
 
@@ -416,6 +418,8 @@ The tray icon changes colour:
 - 🟢 Green — good posture
 - 🔴 Red — bad posture
 - ⚪ Grey — no person detected / tracker not running
+
+Tray context menu styling is also explicitly themed in code to avoid low-contrast text on Windows taskbar popups.
 
 ---
 
@@ -533,7 +537,8 @@ When `demo_mode` is enabled, subscription verification is forced to online and f
   "demo_mode": false,
   "dev_mode": false,
   "api_base": "http://localhost:8000/api/v1",
-  "billing_url": "http://localhost:3000/settings/billing"
+  "billing_url": "http://localhost:3000/settings/billing",
+  "web_base_url": "http://localhost:3000"
 }
 ```
 
@@ -541,14 +546,18 @@ When `demo_mode` is enabled, subscription verification is forced to online and f
 
 ## Development Notes
 
+### UI framework
+
+The GUI is built with **PyQt6** (stacked navigation, dashboard, reports, account settings, tray interactions).
+
 ### Replacing Placeholders for Production
 
 See `PLACEHOLDERS.md` for the full list. Key items:
 
 | File | What to change |
 |------|---------------|
-| `core/constants.py` line 10 | `API_BASE` → production API URL |
-| `core/constants.py` line 18 | `BILLING_URL` → real billing portal |
+| `data/runtime_config.json` or env `POSTURE_API_BASE` | Production API base URL (`…/api/v1`) |
+| `data/runtime_config.json` or env `POSTURE_BILLING_URL` | Real billing portal URL |
 | `views/login_page.py` line 121 | Signup redirect URL |
 | `views/login_page.py` line 128 | Footer links (privacy, terms) |
 | `report_generator.py` | SMTP host/port/credentials |

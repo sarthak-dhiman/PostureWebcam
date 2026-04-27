@@ -17,7 +17,7 @@ from PyQt6.QtCore import QTimer, pyqtSignal, QObject, Qt
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QFont, QBrush
 from core.icons import icon
 from core.workers import SubscriptionMonitor, PostureTrackerThread
-from core.constants import APP_NAME
+from core.constants import APP_NAME, C
 
 # Import live stats path
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -254,6 +254,36 @@ class EnhancedTrayIcon(QSystemTrayIcon):
     def _create_menu(self):
         """Create enhanced context menu."""
         menu = QMenu()
+        # Force readable tray menu colors on Windows taskbar context menus.
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {C.BG_SECONDARY};
+                color: {C.TEXT_PRIMARY};
+                border: 1px solid {C.BORDER_SUBTLE};
+                padding: 6px;
+            }}
+            QMenu::item {{
+                padding: 8px 12px;
+                border-radius: 6px;
+                color: {C.TEXT_PRIMARY};
+                background: transparent;
+            }}
+            QMenu::item:selected {{
+                background: {C.BG_HOVER};
+                color: {C.TEXT_PRIMARY};
+            }}
+            QMenu::item:disabled {{
+                color: {C.TEXT_DISABLED};
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: {C.BORDER_SUBTLE};
+                margin: 6px 4px;
+            }}
+            QMenu::icon {{
+                padding-left: 4px;
+            }}
+        """)
         
         # Status info (non-clickable)
         self._status_action = menu.addAction("Status: Checking...")

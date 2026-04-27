@@ -33,16 +33,16 @@ class JoinOrgPage(QWidget):
 
         # ── Root layout ─────────────────────────────────────────────
         page_layout = QVBoxLayout(self)
-        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setContentsMargins(24, 16, 24, 20)
         page_layout.setSpacing(0)
 
         # Back / cancel button (top-left, always visible)
         top_bar = QHBoxLayout()
-        top_bar.setContentsMargins(16, 12, 16, 0)
+        top_bar.setContentsMargins(0, 0, 0, 0)
         self._back_btn = QPushButton("← Back")
         self._back_btn.setObjectName("linkBtn")
         self._back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._back_btn.setFixedWidth(80)
+        self._back_btn.setFixedWidth(88)
         self._back_btn.clicked.connect(self._on_cancel)
         top_bar.addWidget(self._back_btn)
         top_bar.addStretch()
@@ -55,9 +55,9 @@ class JoinOrgPage(QWidget):
 
         card = QFrame()
         card.setObjectName("authCard")
-        card.setFixedWidth(460)
+        card.setFixedWidth(500)
         lay = QVBoxLayout(card)
-        lay.setContentsMargins(36, 44, 36, 40)
+        lay.setContentsMargins(36, 38, 36, 34)
         lay.setSpacing(0)
 
         # Title
@@ -72,7 +72,7 @@ class JoinOrgPage(QWidget):
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sub.setWordWrap(True)
         lay.addWidget(sub)
-        lay.addSpacing(28)
+        lay.addSpacing(24)
 
         # Invite code input
         self._code_input = QLineEdit()

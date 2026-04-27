@@ -406,10 +406,12 @@ class PostureTrackerThread(QThread):
         self._interval = max(100, int(poll_interval_ms))
         self._spawn_daemon_enabled = spawn_daemon
         self._daemon_proc = None   # subprocess.Popen handle for tracker_daemon.py
+        self._last_spawn_error: str = ""
         # live stats path (same location used by system_tray_widget)
         from pathlib import Path
         self._base = Path(__file__).resolve().parents[1]
         self._live_stats = self._base / "live_stats.json"
+        self._live_frame = self._base / "live_frame.jpg"
 
     # ------------------------------------------------------------------
     # daemon process helpers
@@ -418,15 +420,59 @@ class PostureTrackerThread(QThread):
         """Terminate tracker_daemon.py subprocess if it is running."""
         _pid_file = str(self._base / "data" / "tracker_daemon.pid")
         proc = self._daemon_proc
+        killed_any = False
         if proc is not None and proc.poll() is None:
             try:
                 proc.terminate()
                 proc.wait(timeout=3)
+                killed_any = True
             except Exception:
                 try:
                     proc.kill()
+                    killed_any = True
                 except Exception:
                     pass
+        # Fallback: if handle is missing/stale, kill by persisted PID.
+        try:
+            if os.path.exists(_pid_file):
+                with open(_pid_file, "r", encoding="utf-8") as _pf:
+                    _pid = int((_pf.read() or "").strip())
+                if _pid > 0:
+                    try:
+                        if sys.platform == "win32":
+                            import ctypes
+                            PROCESS_TERMINATE = 0x0001
+                            _hnd = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE, False, _pid)
+                            if _hnd:
+                                ctypes.windll.kernel32.TerminateProcess(_hnd, 1)
+                                ctypes.windll.kernel32.CloseHandle(_hnd)
+                                killed_any = True
+                        else:
+                            os.kill(_pid, 15)
+                            killed_any = True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # Last-resort cleanup: terminate any stray tracker_daemon.py processes.
+        # This prevents camera lock leaks if handle/PID-file bookkeeping failed.
+        try:
+            if sys.platform == "win32":
+                import subprocess as _sp
+                _ps = (
+                    "Get-CimInstance Win32_Process | "
+                    "Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -like '*tracker_daemon.py*' } | "
+                    "ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }"
+                )
+                _sp.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", _ps],
+                    stdout=_sp.DEVNULL,
+                    stderr=_sp.DEVNULL,
+                    timeout=3,
+                    check=False,
+                )
+        except Exception:
+            pass
         self._daemon_proc = None
         # Remove PID file so the next spawn does not try to kill a stale PID
         try:
@@ -438,10 +484,12 @@ class PostureTrackerThread(QThread):
     def _spawn_daemon(self):
         """Start tracker_daemon.py as a detached subprocess (no console window)."""
         if not self._spawn_daemon_enabled:
-            return
+            self._last_spawn_error = "Daemon spawning is disabled."
+            return False
         import subprocess, sys
         if self._daemon_proc is not None and self._daemon_proc.poll() is None:
-            return  # already running
+            self._last_spawn_error = ""
+            return True  # already running
         daemon_script = str(self._base / "tracker_daemon.py")
         _pid_file = str(self._base / "data" / "tracker_daemon.pid")
 
@@ -479,8 +527,14 @@ class PostureTrackerThread(QThread):
         if getattr(sys, "frozen", False):
             _exe_dir = os.path.dirname(sys.executable)
             _daemon_exe = os.path.join(_exe_dir, "tracker_daemon.exe")
+            if not os.path.exists(_daemon_exe):
+                self._last_spawn_error = f"tracker_daemon.exe not found at {_daemon_exe}"
+                return False
             _cmd = [_daemon_exe, "--no-tray"]
         else:
+            if not os.path.exists(daemon_script):
+                self._last_spawn_error = f"tracker_daemon.py not found at {daemon_script}"
+                return False
             _cmd = [sys.executable, daemon_script, "--no-tray"]
 
         try:
@@ -488,7 +542,16 @@ class PostureTrackerThread(QThread):
                 _cmd,
                 **_popen_kwargs,
             )
+            # Fail-fast if process exits immediately.
+            try:
+                proc.wait(timeout=0.4)
+                self._last_spawn_error = f"Tracker daemon exited immediately (code {proc.returncode})."
+                self._daemon_proc = None
+                return False
+            except subprocess.TimeoutExpired:
+                pass
             self._daemon_proc = proc
+            self._last_spawn_error = ""
             # Persist PID so it can be killed if the app exits unexpectedly
             try:
                 os.makedirs(os.path.dirname(_pid_file), exist_ok=True)
@@ -496,8 +559,11 @@ class PostureTrackerThread(QThread):
                     _pf.write(str(proc.pid))
             except Exception:
                 pass
+            return True
         except Exception as e:
+            self._last_spawn_error = str(e)
             print(f"[PostureTrackerThread] Failed to spawn tracker_daemon: {e}")
+            return False
 
     def ensure_daemon_running(self) -> None:
         """Public helper to ensure the tracker daemon subprocess is running.
@@ -525,14 +591,23 @@ class PostureTrackerThread(QThread):
 
     def start_capture(self):
         """Bring the tracker out of hold and begin capturing (non-blocking)."""
-        # Delete stale live_stats.json so the worker doesn't show last-session
-        # data while the fresh daemon is booting up.
+        # Delete stale live IPC files so the UI never shows last-session
+        # status/frame while the fresh daemon is booting up.
         try:
             if self._live_stats.exists():
                 self._live_stats.unlink()
         except Exception:
             pass
-        self._spawn_daemon()
+        try:
+            if self._live_frame.exists():
+                self._live_frame.unlink()
+        except Exception:
+            pass
+        if not self._spawn_daemon():
+            self._hold = True
+            detail = self._last_spawn_error or "Could not start tracker daemon."
+            self.status_changed.emit("hold", f"Tracker start failed: {detail}")
+            return
         self._hold = False
         self.status_changed.emit("running", "Tracker running")
 

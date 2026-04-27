@@ -14,7 +14,7 @@ import time as _time
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QSizePolicy, QStackedWidget,
+    QFrame, QSizePolicy, QStackedWidget, QGridLayout,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread
 import urllib.request
@@ -74,11 +74,15 @@ class DashboardPage(QWidget):
         self._is_free_tier: bool = True
         self._session_start_time: float | None = None  # wall-clock time.time()
 
-        # Bad-posture streak tracking: the daemon accumulates bad_streak_sec
-        # continuously across GUI sessions.  We store the value seen at the
-        # moment the session starts so the dial is always session-relative.
-        self._bad_streak_baseline: int = 0
-        self._bad_streak_baseline_set: bool = False
+        # Bad-posture streak comes directly from daemon as consecutive bad
+        # seconds. Keep this aligned with notifier timing (no local baseline).
+        self._bad_alert_armed: bool = True
+        # Session-relative baselines for daemon timers that may have started
+        # before the user pressed "Start Tracking".
+        self._sit_elapsed_baseline: int = 0
+        self._sit_elapsed_baseline_set: bool = False
+        self._eye_elapsed_baseline: int = 0
+        self._eye_elapsed_baseline_set: bool = False
 
         # load interval settings for dials
         cfg = _load_config()
@@ -95,7 +99,7 @@ class DashboardPage(QWidget):
         # ── Main content page ────────────────────────────────────────
         content_widget = QWidget()
         root = QVBoxLayout(content_widget)
-        root.setContentsMargins(32, 28, 32, 28)
+        root.setContentsMargins(36, 32, 36, 30)
         root.setSpacing(0)
 
         # Header row — title on left, Join Organisation button on right
@@ -116,45 +120,47 @@ class DashboardPage(QWidget):
         join_org_btn.clicked.connect(self.join_org_requested.emit)
         hdr_row.addWidget(join_org_btn)
         root.addLayout(hdr_row)
-
-        sub = QLabel("Monitor your posture in real time.")
+        sub = QLabel("Live monitoring, reminders, and session insights in one workspace.")
         sub.setObjectName("pageSubheader")
         root.addWidget(sub)
-        root.addSpacing(24)
-
-        # ── Live status bar ─────────────────────────────────────────
-        self._status_bar = QLabel("Status: Idle")
-        self._status_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._status_bar.setObjectName("statusBar")
-        self._status_bar.setStyleSheet(
-            f"font-size: 13px; font-weight: 600; padding: 6px 14px; "
-            f"background: {C.BG_INPUT}; border-radius: 8px; color: {C.TEXT_SECONDARY};"
-        )
-        root.addWidget(self._status_bar)
-        root.addSpacing(6)
-
-        # ── Quota bar (only visible for free-tier users) ─────────────
-        self._quota_bar = QLabel()
-        self._quota_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._quota_bar.setStyleSheet(
-            f"font-size: 12px; font-weight: 600; padding: 4px 14px; "
-            f"background: {C.BG_INPUT}; border-radius: 8px; color: {C.ACCENT_AMBER};"
-        )
-        self._quota_bar.setVisible(False)
-        root.addWidget(self._quota_bar)
-        root.addSpacing(8)
+        root.addSpacing(18)
 
         # 30-second timer to auto-stop when free quota is exhausted
         self._quota_check_timer = QTimer(self)
         self._quota_check_timer.setInterval(30_000)
         self._quota_check_timer.timeout.connect(self._check_quota_mid_session)
 
-        # ── Webcam live feed ─────────────────────────────────────────
+        # ── Main split layout (monitoring + controls) ───────────────
+        content_grid = QGridLayout()
+        content_grid.setHorizontalSpacing(18)
+        content_grid.setVerticalSpacing(18)
+        content_grid.setColumnStretch(0, 5)
+        content_grid.setColumnStretch(1, 4)
+
+        # Left column card: status + quota + live preview
+        monitor_card = QFrame()
+        monitor_card.setObjectName("planCard")
+        monitor_lay = QVBoxLayout(monitor_card)
+        monitor_lay.setContentsMargins(16, 16, 16, 16)
+        monitor_lay.setSpacing(10)
+
+        self._status_bar = QLabel("Status: Idle")
+        self._status_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status_bar.setObjectName("statusBar")
+        self._status_bar.setStyleSheet(f"color: {C.TEXT_SECONDARY};")
+        monitor_lay.addWidget(self._status_bar)
+
+        self._quota_bar = QLabel()
+        self._quota_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._quota_bar.setObjectName("quotaBar")
+        self._quota_bar.setStyleSheet(f"color: {C.ACCENT_AMBER};")
+        self._quota_bar.setVisible(False)
+        monitor_lay.addWidget(self._quota_bar)
+
         cam_frame = QFrame()
         cam_frame.setObjectName("webcamPlaceholder")
-        cam_frame.setMinimumHeight(240)
+        cam_frame.setMinimumHeight(340)
         cam_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
         cam_lay = QVBoxLayout(cam_frame)
         cam_lay.setContentsMargins(0, 0, 0, 0)
         cam_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -178,36 +184,48 @@ class DashboardPage(QWidget):
         self._frame_timer.setInterval(250)  # 4 fps display polling
         self._frame_timer.timeout.connect(self._refresh_cam_frame)
 
-        root.addWidget(cam_frame, 3)
-        root.addSpacing(20)
+        monitor_lay.addWidget(cam_frame, 1)
+        content_grid.addWidget(monitor_card, 0, 0, 2, 1)
 
-        # ── KPI cards row ───────────────────────────────────────────
-        cards_row = QHBoxLayout()
-        cards_row.setSpacing(16)
+        # Right top card: session summary
+        summary_card = QFrame()
+        summary_card.setObjectName("planCard")
+        summary_lay = QVBoxLayout(summary_card)
+        summary_lay.setContentsMargins(16, 16, 16, 16)
+        summary_lay.setSpacing(10)
+        summary_title = QLabel("Session Summary")
+        summary_title.setObjectName("pageSubheader")
+        summary_lay.addWidget(summary_title)
+
+        cards_row = QVBoxLayout()
+        cards_row.setSpacing(12)
 
         self._score_card = KpiCard(title="Posture Score", value="—", subtitle="Good / total samples")
         self._time_card  = KpiCard(title="Time Tracked", value="0 min", subtitle="This session")
-        self._alert_card = KpiCard(title="Alerts", value="0", subtitle="Bad posture detections")
+        self._alert_card = KpiCard(title="Alerts", value="0", subtitle="Alert events sent")
 
         for card in (self._score_card, self._time_card, self._alert_card):
             card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            card.setMinimumHeight(108)
+            card.setMaximumHeight(108)
             cards_row.addWidget(card)
 
-        root.addLayout(cards_row)
-        root.addSpacing(20)
+        summary_lay.addLayout(cards_row)
+        content_grid.addWidget(summary_card, 0, 1)
 
-        # ── Countdown dials row ────────────────────────────────────────
-        dials_section = QLabel("NEXT BREAK REMINDERS")
-        dials_section.setStyleSheet(
-            f"font-size: 11px; font-weight: 700; color: {C.TEXT_DISABLED}; letter-spacing: 1px;"
-        )
-        root.addWidget(dials_section)
-        root.addSpacing(8)
+        # Right bottom card: reminders + action
+        reminders_card = QFrame()
+        reminders_card.setObjectName("planCard")
+        reminders_lay = QVBoxLayout(reminders_card)
+        reminders_lay.setContentsMargins(16, 16, 16, 16)
+        reminders_lay.setSpacing(12)
+        dials_section = QLabel("Break Reminders")
+        dials_section.setObjectName("pageSubheader")
+        reminders_lay.addWidget(dials_section)
 
         dials_row = QHBoxLayout()
         dials_row.setSpacing(12)
         dials_row.setContentsMargins(0, 0, 0, 0)
-        dials_row.addStretch(1)
 
         self._eye_dial  = DialWidget("Eye Break",         self._eye_total_sec,  C.ACCENT_BLUE)
         self._sit_dial  = DialWidget("Sit Break",         self._sit_total_sec,  C.ACCENT_EMERALD)
@@ -218,27 +236,23 @@ class DashboardPage(QWidget):
             dial.setMaximumSize(140, 160)
             dial.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             dials_row.addWidget(dial)
-            dials_row.addSpacing(8)
-
-        dials_row.addStretch(1)
-        root.addLayout(dials_row)
-        root.addSpacing(20)
+        reminders_lay.addLayout(dials_row)
 
         # ── Toggle button ───────────────────────────────────────────
         btn_row = QHBoxLayout()
-        btn_row.addStretch()
-
-        self._toggle_btn = QPushButton("  Start Tracking")
+        self._toggle_btn = QPushButton("Start Tracking")
         self._toggle_btn.setIcon(icon("play"))
         self._toggle_btn.setObjectName("toggleBtn")
         self._toggle_btn.setProperty("tracking", "false")
         self._toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         # make the button adapt to available space
-        self._toggle_btn.setMinimumWidth(180)
+        self._toggle_btn.setMinimumWidth(200)
         self._toggle_btn.clicked.connect(self._on_toggle)
-        btn_row.addWidget(self._toggle_btn)
-        btn_row.addStretch()
-        root.addLayout(btn_row)
+        btn_row.addWidget(self._toggle_btn, 1)
+        reminders_lay.addLayout(btn_row)
+        content_grid.addWidget(reminders_card, 1, 1)
+
+        root.addLayout(content_grid, 1)
 
         # ── Subscription gate page ──────────────────────────────────
         gate_widget = QWidget()
@@ -366,6 +380,7 @@ class DashboardPage(QWidget):
         """
         label  = sample.get("label", "unknown")
         reason = sample.get("reason", "")
+        cam_height_state = sample.get("camera_height_state", "unknown")
 
         # ── Status bar — always live, even before the button is clicked ──
         if label == "good":
@@ -380,14 +395,21 @@ class DashboardPage(QWidget):
         elif label in ("no_tracker", "no_body"):
             color = C.TEXT_DISABLED
             text  = "No body detected"
+        elif label == "error":
+            color = C.ACCENT_RED
+            text = f"Tracker error — {reason}" if reason else "Tracker error"
         else:
             color = C.TEXT_SECONDARY
             text  = "Detecting..."
 
+        if cam_height_state == "camera_low":
+            text = f"{text} | Raise camera height"
+        elif cam_height_state == "camera_high":
+            text = f"{text} | Lower camera height"
+
         self._status_bar.setText(f"Status: {text}")
         self._status_bar.setStyleSheet(
-            f"font-size: 13px; font-weight: 600; padding: 6px 14px; "
-            f"background: {C.BG_INPUT}; border-radius: 8px; color: {color};"
+            f"color: {color};"
         )
 
         # ── Everything below only matters when a session is running ──
@@ -399,7 +421,6 @@ class DashboardPage(QWidget):
             self._good_count += 1
         elif label == "bad":
             self._bad_count  += 1
-            self._alert_count += 1
 
         total = self._good_count + self._bad_count
         if total > 0:
@@ -416,20 +437,37 @@ class DashboardPage(QWidget):
         eye_elapsed = int(sample.get("eye_elapsed_sec", 0) or 0)
         sit_elapsed = int(sample.get("sit_elapsed_sec", 0) or 0)
         bad_raw     = int(sample.get("bad_streak_sec",  0) or 0)
+        valid_posture_sample = label in ("good", "bad")
 
-        # Compute session-relative bad streak: subtract the baseline captured
-        # at session start.  If the daemon resets (posture went good, streak
-        # dropped to 0 or below baseline), update the baseline too.
-        if not self._bad_streak_baseline_set:
-            self._bad_streak_baseline = bad_raw
-            self._bad_streak_baseline_set = True
-        if bad_raw < self._bad_streak_baseline:
-            # Daemon reset the streak (good posture detected) — new baseline
-            self._bad_streak_baseline = bad_raw
-        bad_elapsed = bad_raw - self._bad_streak_baseline
+        # Use daemon's consecutive bad seconds directly so the dial matches
+        # exactly when bad-posture notifications fire.
+        bad_elapsed = max(0, bad_raw)
 
-        self._eye_dial.set_remaining(max(0, self._eye_total_sec - eye_elapsed))
-        self._sit_dial.set_remaining(max(0, self._sit_total_sec - sit_elapsed))
+        # Count alert events (sustained bad posture), not raw bad samples.
+        if label != "bad":
+            self._bad_alert_armed = True
+        elif bad_elapsed < self._bad_total_sec:
+            self._bad_alert_armed = True
+        elif self._bad_alert_armed:
+            self._alert_count += 1
+            self._bad_alert_armed = False
+
+        # Session-relative sit/eye elapsed counters.
+        if valid_posture_sample and not self._sit_elapsed_baseline_set:
+            self._sit_elapsed_baseline = sit_elapsed
+            self._sit_elapsed_baseline_set = True
+        if valid_posture_sample and not self._eye_elapsed_baseline_set:
+            self._eye_elapsed_baseline = eye_elapsed
+            self._eye_elapsed_baseline_set = True
+        if self._sit_elapsed_baseline_set and sit_elapsed < self._sit_elapsed_baseline:
+            self._sit_elapsed_baseline = sit_elapsed
+        if self._eye_elapsed_baseline_set and eye_elapsed < self._eye_elapsed_baseline:
+            self._eye_elapsed_baseline = eye_elapsed
+        sit_elapsed_session = max(0, sit_elapsed - self._sit_elapsed_baseline) if self._sit_elapsed_baseline_set else 0
+        eye_elapsed_session = max(0, eye_elapsed - self._eye_elapsed_baseline) if self._eye_elapsed_baseline_set else 0
+
+        self._eye_dial.set_remaining(max(0, self._eye_total_sec - eye_elapsed_session))
+        self._sit_dial.set_remaining(max(0, self._sit_total_sec - sit_elapsed_session))
         self._bad_dial.set_remaining(max(0, self._bad_total_sec - bad_elapsed))
 
     def reload_dial_config(self):
@@ -475,7 +513,7 @@ class DashboardPage(QWidget):
                 )
                 return
 
-            self._toggle_btn.setText("  Stop Tracking")
+            self._toggle_btn.setText("Stop Tracking")
             self._toggle_btn.setIcon(icon("stop"))
             self._toggle_btn.setProperty("tracking", "true")
             self._session_start = datetime.now(timezone.utc)
@@ -483,10 +521,21 @@ class DashboardPage(QWidget):
             self._good_count = 0
             self._bad_count  = 0
             self._alert_count = 0
-            # Reset bad-streak baseline so the dial counts from 0 for this session
-            self._bad_streak_baseline = 0
-            self._bad_streak_baseline_set = False
+            self._bad_alert_armed = True
+            self._sit_elapsed_baseline = 0
+            self._sit_elapsed_baseline_set = False
+            self._eye_elapsed_baseline = 0
+            self._eye_elapsed_baseline_set = False
             self._status_bar.setText("Status: Starting...")
+            # Clear any stale preview immediately; a fresh frame will be shown
+            # once the tracker daemon writes the new session output.
+            self._cam_lbl.clear()
+            self._cam_placeholder.setVisible(True)
+            try:
+                if _os.path.exists(_LIVE_FRAME):
+                    _os.remove(_LIVE_FRAME)
+            except Exception:
+                pass
             self._frame_timer.start()
             if self._is_free_tier:
                 self._quota_check_timer.start()
@@ -510,7 +559,7 @@ class DashboardPage(QWidget):
                 self._session_start_time = None
             self.session_ended.emit(elapsed)
 
-            self._toggle_btn.setText("  Start Tracking")
+            self._toggle_btn.setText("Start Tracking")
             self._toggle_btn.setIcon(icon("play"))
             self._toggle_btn.setProperty("tracking", "false")
             self._session_start = None

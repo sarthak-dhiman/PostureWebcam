@@ -147,7 +147,7 @@ class MainWindow(QMainWindow):
         self._join_org_page.org_joined.connect(self._on_org_joined)
         self._join_org_page.cancelled.connect(self._on_join_org_cancelled)
         # When user requests to join from settings, navigate to the join-org widget
-        self._user_settings_page.go_to_join.connect(lambda: self._stack.setCurrentIndex(self._stack.indexOf(self._join_org_page)))
+        self._user_settings_page.go_to_join.connect(lambda: self._set_stack_index(self._stack.indexOf(self._join_org_page)))
         self._user_settings_page.solo_continue.connect(self._show_main_app)
         self._account_page.logout_btn.clicked.connect(self._on_logout)
         self._account_page.settings_changed.connect(self._dashboard_page.reload_dial_config)
@@ -226,6 +226,23 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
+                    # Create tracker thread on cached auto-login as well.
+                    # Without this, Start Tracking can toggle the dashboard UI
+                    # to "Starting..." while no backend worker exists.
+                    try:
+                        if self._tracker is None:
+                            self._tracker = PostureTrackerThread(poll_interval_ms=500, parent=self)
+                            self._tracker.posture_update.connect(self._dashboard_page.on_posture_update)
+                            self._tracker.posture_update.connect(self._reports_page.append_sample)
+                            self._tracker.start()
+                            # Keep on hold until subscription state allows capture.
+                            try:
+                                self._tracker.set_hold(True)
+                            except Exception:
+                                pass
+                    except Exception:
+                        self._tracker = None
+
                     # Fetch quota for free-tier display (auto-login path)
                     try:
                         _qtoken = cached.get("token") or ""
@@ -240,26 +257,32 @@ class MainWindow(QMainWindow):
                     if cached.get("first_time", False):
                         # Defer so the window paints its initial blank state first
                         from PyQt6.QtCore import QTimer
-                        QTimer.singleShot(50, lambda: self._stack.setCurrentIndex(PAGE_JOIN_ORG))
+                        QTimer.singleShot(50, lambda: self._set_stack_index(PAGE_JOIN_ORG))
                     else:
                         # Defer navigation + DB load so window renders before stats populate
                         from PyQt6.QtCore import QTimer
                         QTimer.singleShot(50, self._show_main_app)
                 else:
                     # expired — show login
-                    self._stack.setCurrentIndex(PAGE_LOGIN)
+                    self._set_stack_index(PAGE_LOGIN)
             except Exception:
-                self._stack.setCurrentIndex(PAGE_LOGIN)
+                self._set_stack_index(PAGE_LOGIN)
         else:
             # Default start on login
-            self._stack.setCurrentIndex(PAGE_LOGIN)
+            self._set_stack_index(PAGE_LOGIN)
 
     # ── Navigation ──────────────────────────────────────────────────────
     def _navigate_to(self, page_idx: int):
-        self._stack.setCurrentIndex(page_idx)
+        self._set_stack_index(page_idx)
         self._sidebar.set_active_page(page_idx)
         # Do not show the back button by default; keep navigation controls in the sidebar.
         self._back_btn.setVisible(False)
+
+    def _set_stack_index(self, page_idx: int):
+        """Set page index directly (stable, no cross-page blending)."""
+        if self._stack.currentIndex() == page_idx:
+            return
+        self._stack.setCurrentIndex(page_idx)
 
     # ── Auth flow ───────────────────────────────────────────────────────
     def _on_login_success(self, user: dict):
@@ -305,7 +328,7 @@ class MainWindow(QMainWindow):
             self._tracker = None
 
         if user.get("first_time", False):
-            self._stack.setCurrentIndex(PAGE_JOIN_ORG)
+            self._set_stack_index(PAGE_JOIN_ORG)
         else:
             self._show_main_app()
 
@@ -338,7 +361,7 @@ class MainWindow(QMainWindow):
             pass
         # Show the back button for context
         self._back_btn.setVisible(False)
-        self._stack.setCurrentIndex(self._stack.indexOf(self._join_org_page))
+        self._set_stack_index(self._stack.indexOf(self._join_org_page))
 
     def _on_join_org_cancelled(self):
         """Return to whatever page was active before the join-org page was opened."""
@@ -410,7 +433,7 @@ class MainWindow(QMainWindow):
             pass
         self._sidebar.setVisible(False)
         self._login_page.reset()
-        self._stack.setCurrentIndex(PAGE_LOGIN)
+        self._set_stack_index(PAGE_LOGIN)
 
     def _on_toggle_maximize(self):
         try:

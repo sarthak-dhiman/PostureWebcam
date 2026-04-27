@@ -134,8 +134,9 @@ import database
 # Load configuration from file
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "app_config.json")
 _AUTH_CACHE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "auth_cache.json")
-# App icon used in system notifications
-_APP_ICON    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "office.png")
+# App icon used in system notifications (Windows balloon/toast expects .ico).
+_APP_ICON_ICO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "office.ico")
+_APP_ICON = _APP_ICON_ICO if os.path.isfile(_APP_ICON_ICO) else None
 
 def load_config():
     """Load app configuration, return defaults if file doesn't exist."""
@@ -146,7 +147,11 @@ def load_config():
         return {
             "alert_timing_seconds": 30,
             "notifications_enabled": True,
-            "sound_enabled": True
+            "sound_enabled": True,
+            # If another app needs the camera, release ours and back off.
+            "auto_yield_on_camera_request": True,
+            # How long we wait before trying to reacquire after yielding.
+            "camera_yield_seconds": 20,
         }
 
 # Global config object
@@ -180,9 +185,18 @@ BAD_STREAK_LIMIT = _config.get("alert_timing_seconds", 30)  # consecutive bad fr
 # ONNX posture model — small MLP trained on 5 MediaPipe keypoints (24 features → 2 classes).
 # Input:  [batch, 24]  — nose, l_shoulder, r_shoulder, l_hip, r_hip (x,y) + zero-padding
 # Output: [batch, 2]   — logits for [Good, Bad]
-POSTURE_ONNX_PATH = r"D:\Disease Prediction\saved_models_onnx\posture.onnx"
+_APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+_POSTURE_ONNX_ENV = os.environ.get("POSTURE_ONNX_PATH", "").strip()
+_POSTURE_ONNX_DEFAULT = os.path.join(_APP_ROOT, "posture.onnx")
+POSTURE_ONNX_PATH = (
+    _POSTURE_ONNX_ENV if _POSTURE_ONNX_ENV and os.path.isfile(_POSTURE_ONNX_ENV) else _POSTURE_ONNX_DEFAULT
+)
 # Confidence threshold below which model result is ignored (falls back to heuristic)
-ONNX_CONF_THRESHOLD = 0.65
+ONNX_CONF_THRESHOLD = 0.62
+# MediaPipe landmark visibility — below this, 2D neck/geometry metrics are unreliable.
+MIN_LM_VISIBILITY = 0.45
+MIN_POSE_QUALITY = 0.40
+MIN_SHOULDER_WIDTH = 0.05
 
 # Fallback heuristic thresholds — Y-coordinate only (Z is unreliable on a flat webcam)
 # All ratios are normalised by shoulder width so they are camera-distance-independent.
@@ -222,8 +236,22 @@ HEAD_TILT_STREAK_LIMIT = 8     # consecutive bad frames before alert fires
 # When upright the shoulder midpoint sits at roughly the same depth as the
 # hip midpoint.  A difference > LEAN_BACK_Z_THRESHOLD means the shoulders
 # have been pushed noticeably behind the hips, i.e. the torso is reclined.
-LEAN_BACK_Z_THRESHOLD  = 0.10   # normalised depth units; tune down for more sensitivity
+LEAN_BACK_Z_THRESHOLD  = 0.07   # lower threshold so reclined torso is caught earlier
 LEAN_BACK_STREAK_LIMIT = 8      # consecutive bad frames before alert fires
+# 2-D backup for recline: when ears rise significantly above the session's
+# neutral ear-shoulder ratio, user is typically reclining/chin-up.
+LEAN_BACK_RATIO_DELTA  = 0.09
+
+# Fusion + state machine thresholds (reduces rapid good/bad flip-flopping).
+FUSION_ONNX_WEIGHT = 0.60
+FUSION_HEUR_WEIGHT = 0.40
+BAD_ENTER_THRESHOLD = 0.58
+BAD_EXIT_THRESHOLD = 0.42
+
+# Session calibration + slow adaptation of neutral ear-shoulder ratio.
+CALIB_MIN_FRAMES = 15
+CALIB_MAX_WINDOW = 60
+REF_RATIO_ADAPT_ALPHA = 0.015
 
 # ── Time-based health rules ──────────────────────────────────────────────────
 # Follow the 30-5 rule: after 30 min sitting fire a break reminder.
@@ -247,15 +275,27 @@ DISTANCE_STREAK_LIMIT  = 10
 DISTANCE_COOLDOWN      = 5 * 60   # seconds
 
 # Temporal smoothing: majority over this many frames before issuing a verdict
-LABEL_SMOOTH_WINDOW = 3      # frames
+LABEL_SMOOTH_WINDOW = 5      # frames
 
 # MediaPipe Pose landmark indices
 L_EAR, R_EAR = 7, 8
 L_SHOULDER, R_SHOULDER = 11, 12
 L_HIP, R_HIP = 23, 24
 
+
+def _lm_visibility(pt) -> float:
+    """MediaPipe landmark visibility in [0,1]; default 1.0 if missing (Tasks API)."""
+    try:
+        return float(getattr(pt, "visibility", 1.0))
+    except Exception:
+        return 1.0
+
+
+# Legacy geometry helper (unused by main loop; kept for tooling)
+BAD_POSTURE_THRESHOLD = 18.0  # degrees — used only by compute_posture()
+
 # Live feed files (written by daemon, polled by dashboard live panel)
-_APP_DIR         = os.path.dirname(os.path.abspath(__file__))
+_APP_DIR         = _APP_ROOT
 _LIVE_FRAME_PATH = os.path.join(_APP_DIR, "live_frame.jpg")
 _LIVE_STATS_PATH = os.path.join(_APP_DIR, "live_stats.json")
 _STREAM_FRAME_BYTES = None  # latest scaled JPEG bytes for MJPEG streaming
@@ -636,9 +676,25 @@ def _get_screen_info() -> dict:
     except Exception as exc:
         log.warning("Screen size detection failed (%s) — using 24\" defaults.", exc)
 
+    # When EDID physical size is unavailable/inaccurate, estimate from
+    # resolution with a conservative desktop PPI baseline.
+    if info["width_mm"] <= 0 or info["height_mm"] <= 0:
+        approx_ppi = 92.0
+        w_in = info["width_px"] / approx_ppi
+        h_in = info["height_px"] / approx_ppi
+        info["diagonal_inches"] = round((w_in ** 2 + h_in ** 2) ** 0.5, 1)
+        info["width_mm"] = int(round(w_in * 25.4))
+        info["height_mm"] = int(round(h_in * 25.4))
+
     diag_cm = info["diagonal_inches"] * 2.54
     info["recommended_min_cm"] = int(round(diag_cm * 1.5))
     info["recommended_max_cm"] = int(round(diag_cm * 2.5))
+    # Approximate camera mount guidance relative to floor level:
+    # top-third of screen is usually closest to eye level.
+    info["recommended_camera_band_mm"] = (
+        int(round(info["height_mm"] * 0.66)),
+        int(round(info["height_mm"] * 0.92)),
+    )
     log.info(
         "Screen: %dx%d px  %.1f\"  recommended distance %d-%d cm",
         info["width_px"], info["height_px"],
@@ -646,6 +702,54 @@ def _get_screen_info() -> dict:
         info["recommended_min_cm"], info["recommended_max_cm"],
     )
     return info
+
+
+def _estimate_camera_height_state(lm) -> tuple[str, float]:
+    """Estimate camera vertical placement from face position in frame.
+
+    Returns (state, eye_y):
+      state: "good" | "camera_low" | "camera_high" | "unknown"
+    """
+    try:
+        left_eye_y = float(getattr(lm[2], "y", 0.0))
+        right_eye_y = float(getattr(lm[5], "y", 0.0))
+        eye_y = (left_eye_y + right_eye_y) * 0.5
+    except Exception:
+        return "unknown", -1.0
+
+    # Normalized image Y: 0 = top, 1 = bottom.
+    # Eye line around upper-middle tends to indicate camera near eye level.
+    if eye_y < 0.24:
+        return "camera_low", eye_y
+    if eye_y > 0.44:
+        return "camera_high", eye_y
+    return "good", eye_y
+
+
+def _compute_shoulder_roll_deg(l_sho_x: float, l_sho_y: float, r_sho_x: float, r_sho_y: float) -> float:
+    """Return shoulder tilt from horizontal in degrees (0..90).
+
+    MediaPipe landmarks can be mirrored/swapped visually; using signed dx can
+    yield angles close to 180° and incorrectly flag every frame as bad posture.
+    This normalizes orientation by using absolute deltas before atan2.
+    """
+    dx = abs(float(r_sho_x) - float(l_sho_x))
+    dy = abs(float(r_sho_y) - float(l_sho_y))
+    if dx <= 1e-6:
+        return 90.0 if dy > 0 else 0.0
+    return abs(degrees(atan2(dy, dx)))
+
+
+def _pose_quality(lm) -> float:
+    """Estimate pose reliability from key landmark visibilities."""
+    idx = [L_EAR, R_EAR, L_SHOULDER, R_SHOULDER, L_HIP, R_HIP]
+    vals = []
+    for i in idx:
+        try:
+            vals.append(_lm_visibility(lm[i]))
+        except Exception:
+            vals.append(0.0)
+    return float(sum(vals) / max(len(vals), 1))
 
 
 def _load_posture_model():
@@ -1083,9 +1187,9 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
         mp_pose = mp_solutions.pose
         pose = mp_pose.Pose(
             static_image_mode=False,
-            model_complexity=0,       # lightest model
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
+            model_complexity=1,       # balanced accuracy vs CPU (0=lite, 2=heavy)
+            min_detection_confidence=0.55,
+            min_tracking_confidence=0.55,
         )
         use_tasks = False
     elif mp_tasks is not None:
@@ -1112,8 +1216,8 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                 base_options=base_options,
                 running_mode=RunningMode.IMAGE,
                 num_poses=1,
-                min_pose_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
+                min_pose_detection_confidence=0.55,
+                min_tracking_confidence=0.55,
             )
             pose = PoseLandmarker.create_from_options(options)
             use_tasks = True
@@ -1144,9 +1248,11 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
     is_owner = False
     body_gone_since: float | None = None
     bad_streak_start:  float | None = None  # monotonic time when current bad streak began
+    bad_streak = 0                         # fallback-only consecutive bad frames
     last_bad_notify    = 0.0               # last time bad-posture notification fired
     identity_checked_this_session = False
     label_history: deque = deque(maxlen=LABEL_SMOOTH_WINDOW)  # temporal smoothing
+    camera_height_history: deque = deque(maxlen=7)
     # Fallback baseline for face-based heuristic (width in pixels)
     baseline_face_width = None
     baseline_face_center_y = None
@@ -1154,6 +1260,10 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
     # If None, defaults to 0.70 (upright). We set this once after owner
     # verification to compensate for cameras placed below/above neck level.
     reference_ear_sho_ratio = None
+    reference_ratio_samples: deque = deque(maxlen=CALIB_MAX_WINDOW)
+    calibration_locked = False
+    fwd_angle_ema: float | None = None
+    posture_state = "good"
     use_fallback = 'face_cascade' in locals() and locals().get('face_cascade') is not None
 
     # ── Time-based rule state ────────────────────────────────────────────────
@@ -1182,12 +1292,25 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
     # Frame-skip: update preview buffer every frame; run inference every Nth frame.
     # Camera cap.read() already throttles to camera FPS so no sleep is needed.
     _frame_counter = 0
-    INFER_EVERY    = 5   # inference at ~camera_fps/5  (≈6 Hz for a 30fps cam)
+    INFER_EVERY    = 4   # inference every Nth frame (~7–8 Hz at 30 FPS cam)
 
     # Camera-busy recovery state
     _consec_failures  = 0
     _BUSY_THRESHOLD   = 10   # consecutive failed reads before declaring camera busy
     _cam_busy_active  = False
+    _yield_until_ts   = 0.0
+
+    # Clear stale IPC artefacts from previous runs to prevent frozen/old preview.
+    try:
+        if os.path.exists(_LIVE_FRAME_PATH):
+            os.remove(_LIVE_FRAME_PATH)
+    except Exception:
+        pass
+    try:
+        if os.path.exists(_LIVE_STATS_PATH):
+            os.remove(_LIVE_STATS_PATH)
+    except Exception:
+        pass
 
     log.info("Tracking loop started.")
     try:
@@ -1197,7 +1320,8 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                 f"Screen detected: {_screen_info['diagonal_inches']:.1f}\" "
                 f"({_screen_info['width_px']}×{_screen_info['height_px']})\n"
                 f"Sit {_screen_info['recommended_min_cm']}–{_screen_info['recommended_max_cm']} cm "
-                "from your screen for healthy viewing distance."
+                "from your screen for healthy viewing distance.\n"
+                "Place camera around eye level (upper third of display)."
             ),
             app_name=APP_NAME,
             timeout=12,
@@ -1218,6 +1342,8 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
             if _consec_failures >= _BUSY_THRESHOLD:
                 # ── Camera grabbed by another application ─────────────────
                 if not _cam_busy_active:
+                    _auto_yield = bool(_config.get("auto_yield_on_camera_request", True))
+                    _yield_s = max(5, int(_config.get("camera_yield_seconds", 20)))
                     log.warning(
                         "Camera unavailable after %d consecutive failures — "
                         "another app may have taken it.",
@@ -1230,9 +1356,19 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                     _notify_camera_busy()
                     _cam_busy_active = True
                     cap.release()
+                    if _auto_yield:
+                        _yield_until_ts = time.monotonic() + _yield_s
 
                 # ── Poll every 2 s until the camera is free again ──────────
                 while not stop_event.is_set():
+                    if _yield_until_ts > time.monotonic():
+                        wait_left = int(max(0, _yield_until_ts - time.monotonic()))
+                        _write_live_stats({
+                            "label": "camera_busy",
+                            "reason": f"Camera yielded to another app ({wait_left}s)",
+                        })
+                        time.sleep(1.0)
+                        continue
                     _write_live_stats({
                         "label":  "camera_busy",
                         "reason": "Waiting for camera to become available…",
@@ -1351,8 +1487,15 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                     log.error("Shoulder landmarks missing (len=%d). Dumped to %s", lm_len, str(p))
                 except Exception as _dump_err:
                     log.exception("Failed to dump landmarks: %s", _dump_err)
-                # Skip frame processing when landmark layout is unexpected
-                time.sleep(1)
+                # Skip this frame without blocking the whole loop.
+                _write_live_stats({
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "body_detected": False,
+                    "is_owner": is_owner,
+                    "label": "no_body",
+                    "confidence": None,
+                    "reason": "invalid pose layout",
+                })
                 continue
 
             # ── Identity lock state machine ──────────────────────────
@@ -1379,14 +1522,6 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                     # No owner image loaded — assume owner (graceful fallback)
                     is_owner = True
 
-                # Calibrate neutral ear-shoulder ratio once when owner is first seen
-                if is_owner and reference_ear_sho_ratio is None:
-                    try:
-                        reference_ear_sho_ratio = ear_sho_ratio_geo
-                        log.info("Calibrated reference ear-shoulder ratio: %.3f", reference_ear_sho_ratio)
-                    except Exception:
-                        pass
-
             # ── Posture analysis (only for verified owner) ───────────
             if is_owner:
                 # Helper: access a landmark attribute safely
@@ -1397,8 +1532,17 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                         return float(pt.get(attr, 0.0))
 
                 sho_width = abs(_lv(lm[12], "x") - _lv(lm[11], "x"))
-                if sho_width < 0.05:   # pose barely visible – skip frame
-                    time.sleep(1)
+                pose_q = _pose_quality(lm)
+                if sho_width < MIN_SHOULDER_WIDTH or pose_q < MIN_POSE_QUALITY:
+                    # Landmarks exist but are too weak/noisy for safe classification.
+                    _write_live_stats({
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "body_detected": True,
+                        "is_owner": True,
+                        "label": "no_body",
+                        "confidence": None,
+                        "reason": "low pose quality",
+                    })
                     continue
 
                 # ── Sitting-distance estimation (pinhole camera model) ────────────
@@ -1419,19 +1563,36 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                 label = None
                 confidence = 0.0
                 reason = "unknown"
+                onnx_bad_score: float | None = None
+                heur_bad_score: float = 0.0
 
                 # Always compute ear/shoulder Y ratio — used for the stored
                 # forward-head angle regardless of which classifier runs.
                 ear_y_geo = (_lv(lm[7],  "y") + _lv(lm[8],  "y")) / 2
                 sho_y_geo = (_lv(lm[11], "y") + _lv(lm[12], "y")) / 2
                 ear_sho_ratio_geo = (sho_y_geo - ear_y_geo) / sho_width
-                # Use a session-specific reference ratio (calibrated once after
-                # owner verification) to compensate for camera elevation. If not
-                # set, default to 0.70 which maps to 0°.
+                _v_ear_geo = min(_lm_visibility(lm[7]), _lm_visibility(lm[8]))
+                _v_sho_geo = min(_lm_visibility(lm[11]), _lm_visibility(lm[12]))
+                _geom_reliable_base = (_v_ear_geo >= MIN_LM_VISIBILITY and _v_sho_geo >= MIN_LM_VISIBILITY)
+
+                # Calibrate neutral ear-shoulder ratio from a short reliable window
+                # instead of a single frame snapshot.
+                if not calibration_locked and _geom_reliable_base:
+                    reference_ratio_samples.append(float(ear_sho_ratio_geo))
+                    if len(reference_ratio_samples) >= CALIB_MIN_FRAMES:
+                        reference_ear_sho_ratio = float(np.median(list(reference_ratio_samples)))
+                        calibration_locked = True
+                        log.info("Calibrated reference ear-shoulder ratio: %.3f", reference_ear_sho_ratio)
+                # Use a session-specific reference ratio to compensate for camera elevation.
                 ref_ratio = reference_ear_sho_ratio if reference_ear_sho_ratio is not None else 0.70
                 # Scale to degrees: ref_ratio -> 0°, smaller ratios -> positive forward angle.
                 # Use a slightly larger gain so small neck drops produce larger angle estimates.
-                fwd_angle_est = max(0.0, min(45.0, (ref_ratio - ear_sho_ratio_geo) * 75.0))
+                fwd_raw = max(0.0, min(45.0, (ref_ratio - ear_sho_ratio_geo) * 75.0))
+                if fwd_angle_ema is None:
+                    fwd_angle_ema = fwd_raw
+                else:
+                    fwd_angle_ema = (0.75 * fwd_angle_ema) + (0.25 * fwd_raw)
+                fwd_angle_est = fwd_angle_ema
 
                 # ── Chin-forward detection (z-axis) ──────────────────────────
                 # In MediaPipe z is negative when a point is closer to the
@@ -1441,9 +1602,18 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                     _nose_z  = _lv(lm[0],           'z')
                     _msho_z  = (_lv(lm[L_SHOULDER], 'z') + _lv(lm[R_SHOULDER], 'z')) * 0.5
                     _chin_z_diff = _msho_z - _nose_z   # positive when nose is nearer to camera
-                    chin_bad_frame = _chin_z_diff > CHIN_FORWARD_Z_THRESHOLD
+                    _nose_vis = _lm_visibility(lm[0])
+                    _sho_vis = min(_lm_visibility(lm[L_SHOULDER]), _lm_visibility(lm[R_SHOULDER]))
+                    chin_bad_frame = (_nose_vis >= MIN_LM_VISIBILITY and _sho_vis >= MIN_LM_VISIBILITY and _chin_z_diff > CHIN_FORWARD_Z_THRESHOLD)
                 except Exception:
                     chin_bad_frame = False
+
+                # ── Camera height estimate (smoothed across frames) ──────────
+                cam_state, cam_eye_y = _estimate_camera_height_state(lm)
+                camera_height_history.append(cam_state)
+                stable_cam_state = cam_state
+                if len(camera_height_history) >= 5:
+                    stable_cam_state = max(set(camera_height_history), key=camera_height_history.count)
 
                 # ── Lateral head-tilt detection (ear-to-ear line angle) ──────
                 # Compute the signed angle of the line joining R_EAR → L_EAR
@@ -1470,9 +1640,20 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                     _lb_sho_z = (_lv(lm[L_SHOULDER], 'z') + _lv(lm[R_SHOULDER], 'z')) * 0.5
                     _lb_hip_z = (_lv(lm[L_HIP],      'z') + _lv(lm[R_HIP],      'z')) * 0.5
                     torso_lean_z        = _lb_sho_z - _lb_hip_z   # positive = leaning back
-                    lean_back_bad_frame = torso_lean_z > LEAN_BACK_Z_THRESHOLD
+                    _hip_vis = min(_lm_visibility(lm[L_HIP]), _lm_visibility(lm[R_HIP]))
+                    _sho_vis2 = min(_lm_visibility(lm[L_SHOULDER]), _lm_visibility(lm[R_SHOULDER]))
+                    lean_back_z_bad = (_hip_vis >= MIN_LM_VISIBILITY and _sho_vis2 >= MIN_LM_VISIBILITY and torso_lean_z > LEAN_BACK_Z_THRESHOLD)
+                    _ear_vis2 = min(_lm_visibility(lm[L_EAR]), _lm_visibility(lm[R_EAR]))
+                    lean_back_ratio_delta = ear_sho_ratio_geo - ref_ratio
+                    lean_back_ratio_bad = (
+                        _ear_vis2 >= MIN_LM_VISIBILITY
+                        and _sho_vis2 >= MIN_LM_VISIBILITY
+                        and lean_back_ratio_delta > LEAN_BACK_RATIO_DELTA
+                    )
+                    lean_back_bad_frame = bool(lean_back_z_bad or lean_back_ratio_bad)
                 except Exception:
                     torso_lean_z        = 0.0
+                    lean_back_ratio_delta = 0.0
                     lean_back_bad_frame = False
 
                 # ── Shoulder-uneven detection (roll OR depth OR asym) ────────
@@ -1485,6 +1666,7 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                     try:
                         label, confidence = _classify_posture_onnx(posture_sess, lm)
                         reason = f"onnx conf={confidence:.2f}"
+                        onnx_bad_score = float(confidence if label == "bad" else (1.0 - confidence))
                     except Exception as exc:
                         log.error("ONNX inference error: %s", exc)
                         label = None
@@ -1508,10 +1690,10 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                     try:
                         l_sho_x = _lv(lm[L_SHOULDER], 'x')
                         r_sho_x = _lv(lm[R_SHOULDER], 'x')
-                        dx = r_sho_x - l_sho_x
-                        dy = r_sho_y - l_sho_y
-                        sho_roll_rad = atan2(dy, dx) if dx != 0 else (1.5708 if dy > 0 else -1.5708)
-                        sho_roll_deg = abs(degrees(sho_roll_rad))
+                        sho_roll_deg = _compute_shoulder_roll_deg(
+                            l_sho_x=l_sho_x, l_sho_y=l_sho_y,
+                            r_sho_x=r_sho_x, r_sho_y=r_sho_y,
+                        )
                     except Exception:
                         sho_roll_deg = 0.0
 
@@ -1530,10 +1712,14 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                         EAR_SHO_THRESHOLD, SHO_ASYM_THRESHOLD,
                     )
 
-                    neck_bad  = ear_sho_ratio  < EAR_SHO_THRESHOLD
+                    v_ear = min(_lm_visibility(lm[7]), _lm_visibility(lm[8]))
+                    v_sho = min(_lm_visibility(lm[11]), _lm_visibility(lm[12]))
+                    geom_reliable = v_ear >= MIN_LM_VISIBILITY and v_sho >= MIN_LM_VISIBILITY
+
+                    neck_bad  = geom_reliable and (ear_sho_ratio < EAR_SHO_THRESHOLD)
                     lean_bad  = sho_asym       > SHO_ASYM_THRESHOLD
                     roll_bad  = sho_roll_deg   > SHO_ROLL_THRESHOLD
-                    depth_bad = sho_depth_diff > SHO_DEPTH_THRESHOLD
+                    depth_bad = geom_reliable and (sho_depth_diff > SHO_DEPTH_THRESHOLD)
                     tilt_bad  = head_tilt_bad_frame   # computed above, always available
                     back_bad  = lean_back_bad_frame   # computed above, always available
 
@@ -1544,15 +1730,23 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                     if roll_bad:  parts.append(f"roll={sho_roll_deg:.1f}\u00b0>{SHO_ROLL_THRESHOLD}")
                     if depth_bad: parts.append(f"depth_diff={sho_depth_diff:.3f}>{SHO_DEPTH_THRESHOLD}")
                     if tilt_bad:  parts.append(f"head_tilt={head_tilt_deg_now:.1f}\u00b0>{HEAD_TILT_THRESHOLD}")
+                    if back_bad:
+                        if torso_lean_z > LEAN_BACK_Z_THRESHOLD:
+                            parts.append(f"lean_back_z={torso_lean_z:.3f}>{LEAN_BACK_Z_THRESHOLD}")
+                        if lean_back_ratio_delta > LEAN_BACK_RATIO_DELTA:
+                            parts.append(f"lean_back_ratio_delta={lean_back_ratio_delta:.3f}>{LEAN_BACK_RATIO_DELTA}")
                     reason = "fallback: " + (", ".join(parts) or "OK")
 
                     # Compute a combined pseudo-confidence from the strongest signal.
                     ear_margin   = abs(ear_sho_ratio - EAR_SHO_THRESHOLD) / max(EAR_SHO_THRESHOLD, 0.01)
                     roll_margin  = abs(sho_roll_deg - SHO_ROLL_THRESHOLD)  / max(SHO_ROLL_THRESHOLD, 1.0)
                     depth_margin = sho_depth_diff / max(SHO_DEPTH_THRESHOLD, 1e-6)
-                    back_margin  = torso_lean_z   / max(LEAN_BACK_Z_THRESHOLD, 1e-6)
+                    back_margin_z = torso_lean_z / max(LEAN_BACK_Z_THRESHOLD, 1e-6)
+                    back_margin_ratio = max(0.0, lean_back_ratio_delta) / max(LEAN_BACK_RATIO_DELTA, 1e-6)
+                    back_margin  = max(back_margin_z, back_margin_ratio)
                     combined = max(ear_margin, roll_margin, depth_margin, back_margin)
                     confidence = float(min(1.0, combined))
+                    heur_bad_score = max(heur_bad_score, confidence if raw_label == "bad" else 0.0)
 
                     # Mark shoulder-uneven for the cooldown notifier below
                     shoulder_bad_frame = roll_bad or depth_bad or lean_bad
@@ -1565,6 +1759,13 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                         label = "bad" if bad_count > good_count else "good"
                     else:
                         label = raw_label  # not enough history yet — use raw
+                else:
+                    # ONNX path with sufficient confidence — apply same temporal smoothing
+                    label_history.append(label)
+                    bad_count = label_history.count("bad")
+                    good_count = label_history.count("good")
+                    if len(label_history) >= LABEL_SMOOTH_WINDOW:
+                        label = "bad" if bad_count > good_count else "good"
 
                 # User rule: if forward-head angle (fd) is very small, consider it good.
                 try:
@@ -1581,6 +1782,51 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                     label = 'bad'
                     confidence = min(1.0, abs(head_tilt_deg_now) / HEAD_TILT_THRESHOLD)
                     reason = (reason + f'; head_tilt={head_tilt_deg_now:.1f}\u00b0') if reason else f'head_tilt={head_tilt_deg_now:.1f}\u00b0'
+                    heur_bad_score = max(heur_bad_score, confidence)
+
+                # Lean-back torso recline should also override a "good" verdict.
+                if lean_back_bad_frame and label == 'good':
+                    label = 'bad'
+                    _lb_conf = max(
+                        torso_lean_z / max(LEAN_BACK_Z_THRESHOLD, 1e-6),
+                        max(0.0, lean_back_ratio_delta) / max(LEAN_BACK_RATIO_DELTA, 1e-6),
+                    )
+                    confidence = min(1.0, _lb_conf)
+                    if lean_back_ratio_delta > LEAN_BACK_RATIO_DELTA:
+                        _lb_reason = f"lean_back_ratio_delta={lean_back_ratio_delta:.3f}"
+                    else:
+                        _lb_reason = f"lean_back_z={torso_lean_z:.3f}"
+                    reason = (reason + f'; {_lb_reason}') if reason else _lb_reason
+                    heur_bad_score = max(heur_bad_score, confidence)
+
+                # Base heuristic contribution (always available cues).
+                _base_flags = int(head_tilt_bad_frame) + int(lean_back_bad_frame) + int(chin_bad_frame)
+                heur_bad_score = max(heur_bad_score, min(1.0, 0.34 * _base_flags))
+
+                # Confidence-weighted fusion + hysteresis state machine.
+                model_bad_score = onnx_bad_score if onnx_bad_score is not None else float(1.0 if label == "bad" else 0.0)
+                fused_bad_score = (
+                    (FUSION_ONNX_WEIGHT * model_bad_score) + (FUSION_HEUR_WEIGHT * heur_bad_score)
+                    if onnx_bad_score is not None else heur_bad_score
+                )
+                if posture_state == "good":
+                    if fused_bad_score >= BAD_ENTER_THRESHOLD:
+                        posture_state = "bad"
+                else:
+                    if fused_bad_score <= BAD_EXIT_THRESHOLD:
+                        posture_state = "good"
+                label = posture_state
+                reason = (reason + f"; fuse={fused_bad_score:.2f}") if reason else f"fuse={fused_bad_score:.2f}"
+
+                # Slowly adapt neutral reference during stable good posture only.
+                if label == "good" and _geom_reliable_base:
+                    if reference_ear_sho_ratio is None:
+                        reference_ear_sho_ratio = float(ear_sho_ratio_geo)
+                    else:
+                        reference_ear_sho_ratio = (
+                            (1.0 - REF_RATIO_ADAPT_ALPHA) * reference_ear_sho_ratio
+                            + (REF_RATIO_ADAPT_ALPHA * float(ear_sho_ratio_geo))
+                        )
 
                 log.info("Posture: %s | %s (fwd≈%.1f°)", label, reason, fwd_angle_est)
                 # Update per-issue streak counters for the current frame so the
@@ -1628,9 +1874,23 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                     "shoulder_px":  round(float(sho_px), 1),
                     "dist_min_cm":  _screen_info["recommended_min_cm"],
                     "dist_max_cm":  _screen_info["recommended_max_cm"],
+                    "camera_height_state": stable_cam_state,
+                    "eye_line_y": round(float(cam_eye_y), 3) if cam_eye_y >= 0 else None,
                     "screen_in":    _screen_info["diagonal_inches"],
                     "screen_res":   f"{_screen_info['width_px']}x{_screen_info['height_px']}",
                 })
+                # Persist the sample so Reports/analytics can reflect this session.
+                try:
+                    database.insert_record(
+                        label,
+                        float(ear_y_geo),
+                        float(sho_y_geo),
+                        float((_lv(lm[L_HIP], "y") + _lv(lm[R_HIP], "y")) * 0.5),
+                        float(fwd_angle_est),
+                        is_owner=True,
+                    )
+                except Exception as exc:
+                    log.debug("DB insert failed: %s", exc)
                 _save_snapshot(frame, label)
                 # ── Bad-posture streak: wall-clock seconds, cooldown-gated ──────
                 _now = time.monotonic()
@@ -1761,7 +2021,6 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                             bad_streak = 0
                         # reset body_gone timer since we see face
                         body_gone_since = None
-                        time.sleep(1)
                         continue
 
             if is_owner or identity_checked_this_session:
@@ -1780,6 +2039,9 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
 
         # When no pose was classified this frame, update live stats feed.
         if not (results.pose_landmarks if results is not None else None):
+            label_history.clear()
+            camera_height_history.clear()
+            fwd_angle_ema = None
             _write_live_stats({
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "body_detected": False,
