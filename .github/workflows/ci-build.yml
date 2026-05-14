@@ -10,7 +10,7 @@ jobs:
   #  LINUX  →  dist/PostureApp  +  .AppImage
   # ──────────────────────────────────────────────
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -106,7 +106,9 @@ jobs:
           python -m pip install -r requirements.txt
 
       - name: Build and Package Windows Installer
-        run: .\build_release_installer.ps1
+        run: |
+          choco install innosetup -y
+          .\build_release_installer.ps1
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4

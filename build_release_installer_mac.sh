@@ -15,8 +15,10 @@ fi
 PYTHON_EXE="python3"
 if [ -f "$ROOT_DIR/venv310/bin/python" ]; then
     PYTHON_EXE="$ROOT_DIR/venv310/bin/python"
+elif command -v python &> /dev/null; then
+    PYTHON_EXE="python"
 elif ! command -v $PYTHON_EXE &> /dev/null; then
-    echo "python3 is not on PATH and venv python was not found."
+    echo "python/python3 is not on PATH and venv python was not found."
     exit 1
 fi
 
