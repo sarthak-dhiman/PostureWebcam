@@ -41,7 +41,7 @@ app_datas = [
     (src("pose_landmarker_lite.task"),            "."),
     (src("pose_landmarker_full.task"),            "."),
     # SVG / PNG icon assets
-    (src("icons"),                               "icons"),
+] + ([(src("icons"), "icons")] if os.path.exists(src("icons")) else []) + [
     # Default config files (no auth/session files)
     (src("data", "app_config.json"),             "data"),
     (src("data", "distance_calibration.json"),   "data"),
