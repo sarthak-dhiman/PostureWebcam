@@ -30,10 +30,17 @@ ROOT = os.path.dirname(os.path.abspath(SPEC))   # noqa: F821 (SPEC injected by P
 def src(*parts):
     return os.path.join(ROOT, *parts)
 
-# ============================================================
-# DATA FILES (assets shipped with the bundle)
-# ============================================================
-app_datas = [
+# ── Helper: filter out missing files from datas list ──────────────────────────
+def filter_datas(datas):
+    valid = []
+    for s, d in datas:
+        if os.path.exists(s):
+            valid.append((s, d))
+        else:
+            print(f"  [SPEC] Skipping missing data file: {s}")
+    return valid
+
+app_datas = filter_datas([
     # App icons
     (src("office.png"),                          "."),
     (src("office.ico"),                          "."),
@@ -41,11 +48,14 @@ app_datas = [
     (src("pose_landmarker_lite.task"),            "."),
     (src("pose_landmarker_full.task"),            "."),
     # SVG / PNG icon assets
-] + ([(src("icons"), "icons")] if os.path.exists(src("icons")) else []) + [
+    (src("icons"),                               "icons"),
     # Default config files (no auth/session files)
     (src("data", "app_config.json"),             "data"),
     (src("data", "distance_calibration.json"),   "data"),
-    # Package-level data files auto-collected from installed packages
+])
+
+# Package-level data files auto-collected from installed packages
+app_datas += [
     *collect_data_files("mediapipe",             subdir=None),
     *collect_data_files("cv2",                   subdir=None),
     *collect_data_files("face_recognition_models"),
