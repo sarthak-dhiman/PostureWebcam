@@ -18,11 +18,46 @@ import threading
 import time
 from collections import deque
 from math import atan2, degrees
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import cv2
 import numpy as np
-import onnxruntime as ort
+try:
+    import onnxruntime as ort
+except Exception as _onnx_err:
+    try:
+        import traceback, os
+        # Write a diagnostic file next to the application so end-users
+        # can send it back for triage. Keep this minimal and robust.
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        log_path = os.path.join(app_dir, "onnx_import_error.txt")
+        with open(log_path, "w", encoding="utf-8") as fh:
+            fh.write("ONNX Runtime import failure diagnostic\n")
+            fh.write("Error: %r\n\n" % (_onnx_err,))
+            fh.write("Traceback:\n")
+            fh.write(traceback.format_exc())
+            fh.write("\n\nEnvironment PATH:\n")
+            fh.write(os.environ.get("PATH", ""))
+            fh.write("\n\nPossible ONNX runtime files in app folder:\n")
+            candidates = [
+                os.path.join(app_dir, "_internal", "onnxruntime", "capi"),
+                os.path.join(app_dir, "onnxruntime", "capi"),
+            ]
+            for c in candidates:
+                fh.write('\n-- %s --\n' % c)
+                try:
+                    if os.path.isdir(c):
+                        for name in sorted(os.listdir(c)):
+                            fh.write(name + "\n")
+                    else:
+                        fh.write("(not found)\n")
+                except Exception:
+                    fh.write("(error listing)\n")
+    except Exception:
+        # If logging fails, ignore and continue to raise original error
+        pass
+    # Re-raise original import error so the existing error UI appears.
+    raise
 import face_recognition
 import http.server
 import socketserver
@@ -81,12 +116,21 @@ except ImportError:
 try:
     from core.constants import APP_NAME
 except Exception:
-    APP_NAME = "Posture Tracker"
+    APP_NAME = "PostureCam"
     class QSystemTrayIcon:
         pass
 
 try:
     import importlib
+
+    # The packaged build intentionally excludes MediaPipe's optional GenAI
+    # package because it pulls heavyweight Torch/JAX/SentencePiece imports.
+    # MediaPipe Tasks imports that package from its parent __init__, so provide
+    # a harmless stub to let the Vision task modules import normally.
+    sys.modules.setdefault(
+        "mediapipe.tasks.python.genai",
+        ModuleType("mediapipe.tasks.python.genai"),
+    )
 
     # mediapipe can be packaged with different APIs. Prefer the classic
     # `mediapipe.solutions`, but if it's not available (some builds expose
@@ -99,7 +143,12 @@ try:
             mp_solutions = _mp.solutions
         else:
             mp_solutions = None
-    except Exception:
+    except Exception as exc:
+        import traceback
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "mediapipe_import_error.txt"), "a") as f:
+                f.write(f"mp_solutions import error:\n{traceback.format_exc()}\n")
+        except Exception: pass
         mp_solutions = None
 
     # Also detect the newer Tasks API (used by some mediapipe wheels)
@@ -115,7 +164,16 @@ try:
             "BaseOptions": BaseOptions,
             "mp": _mediapipe_top,
         }
-    except Exception:
+    except Exception as exc:
+        import traceback
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "mediapipe_import_error.txt"), "a") as f:
+                f.write(f"mp_tasks import error:\n{traceback.format_exc()}\n")
+        except Exception: pass
+        try:
+            logging.getLogger("posture").warning("MediaPipe Tasks import failed: %s", exc)
+        except Exception:
+            pass
         mp_tasks = None
 except Exception:
     # Some mediapipe distributions expose submodules differently; import solutions directly
@@ -590,6 +648,10 @@ logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
+    handlers=[
+        logging.FileHandler(os.path.join(_APP_DIR, "posture_tracker.log"), encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
 )
 log = logging.getLogger("posture")
 
@@ -897,203 +959,125 @@ def save_config(config):
         log.error("Failed to save config: %s", exc)
 
 
-def _notify_camera_busy() -> None:
-    """Alert: another app has grabbed the camera — tracking paused."""
+
+# ---------------------------------------------------------------------------
+# Notification helper — writes to live_stats.json so PostureApp.exe fires
+# the Windows toast. This ensures the notification card always shows
+# "PostureCam" (the main exe's name) instead of "tracker_daemon.exe".
+# ---------------------------------------------------------------------------
+
+# Module-level dict that _write_live_stats will merge into the next payload.
+_pending_notification: dict | None = None
+
+
+def _send_notification(title: str, message: str) -> None:
+    """Queue a notification to be dispatched by PostureApp.exe."""
+    global _pending_notification
     if not _config.get("notifications_enabled", True):
         return
     if not _user_signed_in():
         return
-    try:
-            notification.notify(
-            title="Camera In Use — Tracking Paused",
-            message=(
-                "Another application has taken over the camera.\n"
-                "Posture tracking will automatically resume once it is available again."
-            ),
-            app_name=APP_NAME,
-            app_icon=_APP_ICON,
-            timeout=15,
-        )
-    except Exception as exc:
-        log.error("Camera-busy notification failed: %s", exc)
+    _pending_notification = {
+        "title": title,
+        "message": message,
+        "timestamp": time.time(),
+    }
+    log.debug("Notification queued: %s", title)
+
+
+def _notify_camera_busy() -> None:
+    """Alert: another app has grabbed the camera — tracking paused."""
+    _send_notification(
+        "Camera In Use — Tracking Paused",
+        "Another application has taken over the camera.\n"
+        "Posture tracking will automatically resume once it is available again.",
+    )
 
 
 def _notify_camera_resumed() -> None:
     """Alert: camera is free again — tracking resumed."""
-    if not _config.get("notifications_enabled", True):
-        return
-    if not _user_signed_in():
-        return
-    try:
-        notification.notify(
-            title="Camera Available — Tracking Resumed",
-            message="The camera is free again. Posture tracking has resumed.",
-            app_name=APP_NAME,
-            app_icon=_APP_ICON,
-            timeout=10,
-        )
-    except Exception as exc:
-        log.error("Camera-resumed notification failed: %s", exc)
+    _send_notification(
+        "Camera Available — Tracking Resumed",
+        "The camera is free again. Posture tracking has resumed.",
+    )
 
 
 def _notify_bad_posture():
     """General slouch alert."""
-    if not _config.get("notifications_enabled", True):
-        return
-    if not _user_signed_in():
-        return
-    try:
-        alert_msg = f"You've been slouching for {_config.get('alert_timing_seconds', 30)} seconds. Sit up straight!"
-        notification.notify(
-            title="Posture Alert",
-            message=alert_msg,
-            app_name=APP_NAME,
-            app_icon=_APP_ICON,
-            timeout=10,
-        )
-    except Exception as exc:
-        log.error("Notification failed: %s", exc)
+    alert_msg = (
+        f"You've been slouching for "
+        f"{_config.get('alert_timing_seconds', 30)} seconds. Sit up straight!"
+    )
+    _send_notification("Posture Alert", alert_msg)
 
 
 def _notify_take_break():
     """30-5 rule: take a movement break after 30 min of continuous sitting."""
-    if not _user_signed_in():
-        return
-    try:
-        notification.notify(
-            title="Time to Move! (⏱ 30 min)",
-            message="You've been sitting for 30 minutes. Stand up and move or stretch for at least 5 minutes.",
-            app_name=APP_NAME,
-            app_icon=_APP_ICON,
-            timeout=20,
-        )
-    except Exception as exc:
-        log.error("Break notification failed: %s", exc)
+    _send_notification(
+        "Time to Move! (⏱ 30 min)",
+        "You've been sitting for 30 minutes. Stand up and move or stretch for at least 5 minutes.",
+    )
 
 
 def _notify_eye_break():
     """20-20-20 rule: rest eyes every 20 minutes."""
-    if not _user_signed_in():
-        return
-    try:
-        notification.notify(
-            title="Eye Break — 20-20-20",
-            message="Look at something 20 feet away for 20 seconds to reduce eye strain.",
-            app_name=APP_NAME,
-            app_icon=_APP_ICON,
-            timeout=15,
-        )
-    except Exception as exc:
-        log.error("Eye-break notification failed: %s", exc)
+    _send_notification(
+        "Eye Break — 20-20-20",
+        "Look at something 20 feet away for 20 seconds to reduce eye strain.",
+    )
 
 
 def _notify_chin_forward():
     """Chin / forward-head protrusion alert."""
-    if not _user_signed_in():
-        return
-    try:
-        notification.notify(
-            title="Head Posture Alert",
-            message="Tuck your chin in slightly — your head is protruding forward.",
-            app_name=APP_NAME,
-            app_icon=_APP_ICON,
-            timeout=10,
-        )
-    except Exception as exc:
-        log.error("Chin-forward notification failed: %s", exc)
+    _send_notification(
+        "Head Posture Alert",
+        "Tuck your chin in slightly — your head is protruding forward.",
+    )
 
 
 def _notify_head_tilt(deg: float) -> None:
     """Lateral head tilt alert — head dropped to one side."""
-    side = "left" if deg > 0 else "right"   # positive = right ear lower
-    if not _user_signed_in():
-        return
-    try:
-        notification.notify(
-            title="Head Tilt Detected",
-            message=(
-                f"Your head is tilted ~{abs(deg):.0f}° to the {side}. "
-                "Level your head and relax your neck muscles."
-            ),
-            app_name=APP_NAME,
-            app_icon=_APP_ICON,
-            timeout=10,
-        )
-    except Exception as exc:
-        log.error("Head-tilt notification failed: %s", exc)
+    side = "left" if deg > 0 else "right"
+    _send_notification(
+        "Head Tilt Detected",
+        f"Your head is tilted ~{abs(deg):.0f}° to the {side}. "
+        "Level your head and relax your neck muscles.",
+    )
 
 
 def _notify_lean_back() -> None:
     """Torso recline alert — leaning back too far in the chair."""
-    if not _user_signed_in():
-        return
-    try:
-        notification.notify(
-            title="Posture Alert — Leaning Back",
-            message=(
-                "You're reclining too far. Sit upright with your lower back "
-                "supported and your feet flat on the floor."
-            ),
-            app_name=APP_NAME,
-            app_icon=_APP_ICON,
-            timeout=10,
-        )
-    except Exception as exc:
-        log.error("Lean-back notification failed: %s", exc)
+    _send_notification(
+        "Posture Alert — Leaning Back",
+        "You're reclining too far. Sit upright with your lower back "
+        "supported and your feet flat on the floor.",
+    )
 
 
 def _notify_shoulder_uneven():
     """One shoulder significantly closer to or lower than the other."""
-    if not _user_signed_in():
-        return
-    try:
-        notification.notify(
-            title="Shoulder Alignment Alert",
-            message="Your shoulders are uneven or rolled. Sit evenly and relax your shoulders down.",
-            app_name=APP_NAME,
-            app_icon=_APP_ICON,
-            timeout=10,
-        )
-    except Exception as exc:
-        log.error("Shoulder notification failed: %s", exc)
+    _send_notification(
+        "Shoulder Alignment Alert",
+        "Your shoulders are uneven or rolled. Sit evenly and relax your shoulders down.",
+    )
 
 
 def _notify_too_close(dist_cm: int, min_cm: int) -> None:
     """Alert when the user is sitting closer than the recommended minimum distance."""
-    if not _user_signed_in():
-        return
-    try:
-        notification.notify(
-            title="Too Close to Screen!",
-            message=(
-                "You are sitting too close to your screen.  "
-                "Move your chair back or push the monitor further away."
-            ),
-            app_name=APP_NAME,
-            app_icon=_APP_ICON,
-            timeout=10,
-        )
-    except Exception as exc:
-        log.error("Too-close notification failed: %s", exc)
+    _send_notification(
+        "Too Close to Screen!",
+        "You are sitting too close to your screen. "
+        "Move your chair back or push the monitor further away.",
+    )
 
 
 def _notify_too_far(dist_cm: int, max_cm: int) -> None:
     """Alert when the user is sitting further than the recommended maximum distance."""
-    if not _user_signed_in():
-        return
-    try:
-        notification.notify(
-            title="Too Far from Screen",
-            message=(
-                "You are sitting too far from your screen.  "
-                "Lean in slightly or move your chair forward."
-            ),
-            app_name=APP_NAME,
-            app_icon=_APP_ICON,
-            timeout=12,
-        )
-    except Exception as exc:
-        log.error("Too-far notification failed: %s", exc)
+    _send_notification(
+        "Too Far from Screen",
+        "You are sitting too far from your screen. "
+        "Lean in slightly or move your chair forward.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1115,14 +1099,37 @@ def _write_live_frame(bgr_frame) -> None:
 
 
 def _write_live_stats(stats: dict) -> None:
-    """Atomically write the latest posture stats as JSON for the dashboard."""
+    """Atomically write the latest posture stats as JSON for the dashboard.
+
+    If a notification was queued by _send_notification(), it is attached to
+    this payload so PostureApp.exe can fire the Windows toast under its own
+    name (PostureCam) rather than tracker_daemon.exe.
+    """
+    global _pending_notification
     try:
+        stats.setdefault("timestamp", time.strftime("%Y-%m-%dT%H:%M:%S"))
+        if _pending_notification is not None:
+            stats["notification"] = _pending_notification
+            _pending_notification = None          # consume — fire only once
         tmp = _LIVE_STATS_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(stats, fh)
         os.replace(tmp, _LIVE_STATS_PATH)
     except Exception:
         pass
+
+
+
+def _wait_after_startup_failure(stop_event: threading.Event, label: str, reason: str) -> None:
+    """Keep the daemon alive long enough for the GUI to show a useful status."""
+    log.error("%s: %s", label, reason)
+    _write_live_stats({
+        "label": label,
+        "reason": reason,
+        "body_detected": False,
+    })
+    while not stop_event.is_set():
+        time.sleep(0.5)
 
 
 def _save_snapshot(bgr_frame, label: str) -> None:
@@ -1160,21 +1167,76 @@ def _save_snapshot(bgr_frame, label: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _camera_backends() -> list[tuple[int, str]]:
+    if sys.platform == "win32":
+        return [
+            (cv2.CAP_DSHOW, "DirectShow"),
+            (cv2.CAP_ANY,  "Default"),
+        ]
+    return [(cv2.CAP_ANY, "Default")]
+
+
+def _open_camera(stop_event: threading.Event):
+    """Try common backends and camera indexes, returning cap/backend/index/name."""
+    for index in (0, 1, 2, 3):
+        for backend, backend_name in _camera_backends():
+            if stop_event.is_set():
+                return None, backend, index, backend_name
+            cap = cv2.VideoCapture(index, backend)
+            if not cap.isOpened():
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                continue
+
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            ok = False
+            # Give the driver up to 1.5 s (15 × 100 ms) to produce the first frame.
+            # The original 5 × 100 ms was too short for some USB cameras on the
+            # first open after a permission grant.
+            for _ in range(15):
+                ok, _frame = cap.read()
+                if ok and _frame is not None and _frame.size > 0:
+                    break
+                time.sleep(0.1)
+            if ok:
+                log.info("Camera opened on index %d using %s.", index, backend_name)
+                return cap, backend, index, backend_name
+
+            try:
+                cap.release()
+            except Exception:
+                pass
+            log.warning("Camera index %d opened with %s but did not return frames.", index, backend_name)
+    return None, cv2.CAP_ANY, 0, "Default"
+
+
 def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
     """
     Capture one frame per second, run MediaPipe Pose, verify identity once,
     compute posture, log to DB, and conditionally notify.
     """
     # ── Camera open (DirectShow on Windows for reliable auto-exposure) ──────
-    backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
-    cap = cv2.VideoCapture(0, backend)
-    if not cap.isOpened():
-        log.error("Cannot open camera — tracking aborted.")
+    cap, backend, camera_index, backend_name = _open_camera(stop_event)
+    while cap is None and not stop_event.is_set():
+        reason = "Cannot open camera. It may be blocked by privacy settings or another app."
+        log.error("%s Retrying...", reason)
+        _write_live_stats({
+            "label": "camera_busy",
+            "reason": reason,
+            "body_detected": False,
+        })
+        time.sleep(2.0)
+        cap, backend, camera_index, backend_name = _open_camera(stop_event)
+    if stop_event.is_set():
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
         return
-
-    # Request a sensible resolution so the driver initialises properly.
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     # ── Warm-up: give the camera 2 seconds to settle ────────────────────────
     log.info("Camera opened — warming up for 2 seconds…")
@@ -1197,12 +1259,28 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
         # then full). If none found, fall back to a lightweight OpenCV
         # face-based heuristic so the tracker can still run in degraded mode.
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        candidates = [
-            os.path.join(base_dir, "pose_landmarker_lite.task"),
-            os.path.join(base_dir, "pose_landmarker_full.task"),
-            os.path.join(base_dir, "pose_landmarker.task"),
-        ]
+        # In the packaged (frozen) build __file__ points to _internal/tracker_daemon.pyc
+        # so we must also search the exe directory and _MEIPASS root.
+        _candidate_base_dirs = [base_dir]
+        _exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        if _exe_dir not in _candidate_base_dirs:
+            _candidate_base_dirs.append(_exe_dir)
+        _meipass = getattr(sys, "_MEIPASS", None)
+        if _meipass and _meipass not in _candidate_base_dirs:
+            _candidate_base_dirs.append(_meipass)
+        # Also check the _internal subdir of the exe directory (PyInstaller onedir layout)
+        _internal_dir = os.path.join(_exe_dir, "_internal")
+        if os.path.isdir(_internal_dir) and _internal_dir not in _candidate_base_dirs:
+            _candidate_base_dirs.append(_internal_dir)
+
+        candidates = []
+        for _bdir in _candidate_base_dirs:
+            for _model_name in ("pose_landmarker_lite.task", "pose_landmarker_full.task", "pose_landmarker.task"):
+                candidates.append(os.path.join(_bdir, _model_name))
+
         found_model = next((p for p in candidates if os.path.isfile(p)), None)
+        log.info("Searched task model dirs: %s", _candidate_base_dirs)
+        log.info("Task model found: %s", found_model)
         if found_model:
             # Import classes from the tasks API
             BaseOptions = mp_tasks["BaseOptions"]
@@ -1224,9 +1302,9 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
             log.info("Using MediaPipe Tasks model: %s", found_model)
         else:
             log.warning(
-                "mediapipe Tasks API available but no .task model found in %s.\n"
+                "mediapipe Tasks API available but no .task model found in any of: %s\n"
                 "Falling back to OpenCV face-based heuristic (degraded accuracy).",
-                base_dir,
+                _candidate_base_dirs,
             )
             pose = None
             use_tasks = False
@@ -1236,12 +1314,13 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
             except Exception:
                 face_cascade = None
     else:
-        log.error(
-            "mediapipe.solutions API not found in installed mediapipe.\n"
-            "Please install a mediapipe build that provides `mediapipe.solutions` (e.g. a compatible pip wheel),\n"
-            "or provide a PoseLandmarker .task model for the Tasks API. Tracking will not start."
+        reason = (
+            "MediaPipe pose backend is unavailable. The packaged app needs either "
+            "mediapipe.solutions or a bundled PoseLandmarker .task model."
         )
+        log.error(reason)
         cap.release()
+        _wait_after_startup_failure(stop_event, "tracker_error", reason)
         return
 
     # State
@@ -1285,6 +1364,15 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
     dist_close_streak      = 0            # consecutive frames where user is too close
     dist_far_streak        = 0            # consecutive frames where user is too far
     
+    # NEW: Store pending notification to be picked up by main UI
+    _pending_notification = None
+
+    def _queue_notification(title, message):
+        nonlocal _pending_notification
+        if not _user_signed_in():
+            return
+        _pending_notification = {"title": title, "message": message, "timestamp": time.time()}
+
     # Config reload tracking
     last_config_reload     = time.monotonic()
     CONFIG_RELOAD_INTERVAL = 10.0  # Check config every 10 seconds
@@ -1313,21 +1401,16 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
         pass
 
     log.info("Tracking loop started.")
-    try:
-        notification.notify(
-            title=f"{APP_NAME} Started",
-            message=(
-                f"Screen detected: {_screen_info['diagonal_inches']:.1f}\" "
-                f"({_screen_info['width_px']}×{_screen_info['height_px']})\n"
-                f"Sit {_screen_info['recommended_min_cm']}–{_screen_info['recommended_max_cm']} cm "
-                "from your screen for healthy viewing distance.\n"
-                "Place camera around eye level (upper third of display)."
-            ),
-            app_name=APP_NAME,
-            timeout=12,
+    _send_notification(
+        f"{APP_NAME} Started",
+        (
+            f"Screen detected: {_screen_info['diagonal_inches']:.1f}\" "
+            f"({_screen_info['width_px']}×{_screen_info['height_px']})\n"
+            f"Sit {_screen_info['recommended_min_cm']}–{_screen_info['recommended_max_cm']} cm "
+            "from your screen for healthy viewing distance.\n"
+            "Place camera around eye level (upper third of display)."
         )
-    except Exception as exc:
-        log.error("Startup notification failed: %s", exc)
+    )
 
     while not stop_event.is_set():
         # Check for config reload periodically
@@ -1375,14 +1458,11 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                     })
                     time.sleep(2.0)
 
-                    probe = cv2.VideoCapture(0, backend)
-                    if probe.isOpened():
-                        ok2, _ = probe.read()
-                        if ok2:
+                    probe, backend, camera_index, backend_name = _open_camera(stop_event)
+                    if probe is not None:
+                        if True:
                             # Camera is free — take over this handle
                             cap = probe
-                            cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                             # Brief warm-up
                             for _ in range(6):
                                 cap.read()
@@ -1391,10 +1471,6 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
                             log.info("Camera recovered — resuming tracking.")
                             _notify_camera_resumed()
                             break
-                        else:
-                            probe.release()
-                    else:
-                        probe.release()
             else:
                 log.warning(
                     "Frame grab failed — retrying (%d/%d).",
@@ -1454,6 +1530,13 @@ def tracking_loop(stop_event: threading.Event, owner_encoding, posture_sess):
             else:
                 results = SimpleNamespace(pose_landmarks=None)
         else:
+            # mp_solutions path (classic API)
+            if pose is None:
+                # No pose backend available — skip inference this frame
+                _write_live_stats({"label": "no_body", "body_detected": False,
+                                   "reason": "No MediaPipe pose backend available"})
+                time.sleep(0.5)
+                continue
             results = pose.process(rgb)
 
         if results.pose_landmarks:

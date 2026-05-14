@@ -234,7 +234,7 @@ def org_create():
 # In-memory store: token -> remaining_seconds
 # Default: 10-hour free quota (36 000 s)
 QUOTA_STORE: dict[str, int] = {}
-_FREE_QUOTA_DEFAULT = 36_000  # 10 hours
+_FREE_QUOTA_DEFAULT = 604_800  # 7 days
 
 
 def _get_token_from_request() -> str | None:

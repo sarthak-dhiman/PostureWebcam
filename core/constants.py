@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-APP_NAME = "Posture Webcam Analyzer"
+APP_NAME = "PostureCam"
 APP_VERSION = "1.0.0"
 
 # ── Runtime config (env + optional file) ────────────────────────────────────

@@ -20,7 +20,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread
 import urllib.request
 from PyQt6.QtGui import QPixmap
 
-from core.constants import C
+from core.constants import C, APP_NAME
 from core.icons import icon
 from widgets.kpi_card import KpiCard
 from widgets.dial_widget import DialWidget
@@ -69,7 +69,7 @@ class DashboardPage(QWidget):
         # Quota state (populated after login via set_quota)
         # Default to free-tier with 10 h quota so the bar is visible
         # immediately after launch; set_quota() will override with server data.
-        _FREE_QUOTA_DEFAULT = 36_000  # 10 hours in seconds
+        _FREE_QUOTA_DEFAULT = 604_800  # 7 days in seconds
         self._quota_remaining: int | None = _FREE_QUOTA_DEFAULT
         self._is_free_tier: bool = True
         self._session_start_time: float | None = None  # wall-clock time.time()
@@ -176,13 +176,12 @@ class DashboardPage(QWidget):
         cam_lay.addWidget(self._cam_lbl)
         cam_lay.addWidget(self._cam_placeholder, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # Frame refresh timer (fires when tracking is active)
-        # Poll more frequently for a smoother UI; actual file updates
-        # still come from the daemon at ~1 FPS unless preview streaming
-        # is implemented.
+        # Frame refresh timer — runs continuously so preview appears
+        # even before the user clicks "Start Tracking".
         self._frame_timer = QTimer(self)
         self._frame_timer.setInterval(250)  # 4 fps display polling
         self._frame_timer.timeout.connect(self._refresh_cam_frame)
+        self._frame_timer.start()  # always on; daemon writes live_frame.jpg independently
 
         monitor_lay.addWidget(cam_frame, 1)
         content_grid.addWidget(monitor_card, 0, 0, 2, 1)
@@ -416,6 +415,32 @@ class DashboardPage(QWidget):
         if not self._tracking:
             return
 
+        notif = sample.get("notification")
+        if notif:
+            # We track the timestamp to prevent firing the exact same notification twice
+            ts = notif.get("timestamp")
+            if not hasattr(self, "_last_notif_ts") or self._last_notif_ts != ts:
+                self._last_notif_ts = ts
+                self._alert_count += 1
+                try:
+                    from plyer import notification
+                    import os
+                    import sys
+                    if getattr(sys, "frozen", False):
+                        _icon = os.path.join(os.path.dirname(sys.executable), "office.ico")
+                    else:
+                        _icon = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "office.ico")
+                    
+                    notification.notify(
+                        title=notif.get("title", "Posture Alert"),
+                        message=notif.get("message", ""),
+                        app_name=APP_NAME,
+                        app_icon=_icon if os.path.exists(_icon) else None,
+                        timeout=10,
+                    )
+                except Exception as e:
+                    print(f"Failed to display proxied notification: {e}")
+
         # Count samples for posture score
         if label == "good":
             self._good_count += 1
@@ -536,7 +561,7 @@ class DashboardPage(QWidget):
                     _os.remove(_LIVE_FRAME)
             except Exception:
                 pass
-            self._frame_timer.start()
+            self._frame_timer.start(250)  # Make sure the timer is restarted
             if self._is_free_tier:
                 self._quota_check_timer.start()
             # start MJPEG client for smooth preview (best-effort)
@@ -606,7 +631,7 @@ class DashboardPage(QWidget):
         # _is_free_tier defaults True; just re-paint in case something cleared it.
         self._is_free_tier = True
         if self._quota_remaining is None:
-            self._quota_remaining = 36_000
+            self._quota_remaining = 604_800
         self._refresh_quota_bar()
 
     def _refresh_quota_bar(self):
@@ -615,13 +640,17 @@ class DashboardPage(QWidget):
             self._quota_bar.setVisible(False)
             return
         remaining = max(0, self._quota_remaining)
-        hours   = remaining // 3600
+        days = remaining // 86400
+        hours = (remaining % 86400) // 3600
         minutes = (remaining % 3600) // 60
         if remaining <= 0:
             text  = "Free quota exhausted — upgrade to keep monitoring"
             color = C.ACCENT_RED
         else:
-            text  = f"Free Plan: {hours}h {minutes}m remaining"
+            if days > 0:
+                text  = f"Free Plan: {days}d {hours}h remaining"
+            else:
+                text  = f"Free Plan: {hours}h {minutes}m remaining"
             color = C.ACCENT_AMBER
         self._quota_bar.setText(text)
         self._quota_bar.setStyleSheet(
@@ -674,7 +703,7 @@ class MJPEGStreamThread(QThread):
     def run(self):
         buffer = b""
         try:
-            req = urllib.request.Request(self._url, headers={"User-Agent": "PostureApp/1.0"})
+            req = urllib.request.Request(self._url, headers={"User-Agent": "PostureCam/1.0"})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 while self._running:
                     chunk = resp.read(1024)

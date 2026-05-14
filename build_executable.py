@@ -36,9 +36,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-DIST = ROOT / "dist" / "PostureApp"
-SPEC = ROOT / "PostureApp.spec"
+DIST = ROOT / "dist" / "PostureCam"
+SPEC = ROOT / "PostureCam.spec"
 ICO  = ROOT / "office.ico"
+ICNS = ROOT / "office.icns"
 PNG  = ROOT / "office.png"
 
 # ── Sensitive / user files that must NEVER be shipped ───────────────────────
@@ -48,6 +49,10 @@ _STRIP_FILES = [
     "data/tracker_daemon.pid",
     "live_stats.json",
     "live_frame.jpg",
+    "posture_tracker.log",
+    "onnx_import_error.txt",
+    "_internal/onnx_import_error.txt",
+    "_internal/posture_tracker.log",
 ]
 
 # ── Empty directories to create inside the dist (ensure writable at runtime) ─
@@ -100,6 +105,11 @@ def _convert_icon():
         append_images=icons[1:],
     )
     _ok(f"Saved {ICO}")
+    try:
+        img.save(ICNS, format="ICNS")
+        _ok(f"Saved {ICNS}")
+    except Exception as e:
+        _warn(f"Failed to save ICNS: {e}")
 
 
 def _check_pyinstaller():
@@ -155,7 +165,7 @@ def _post_process(
     web_base_url: str = "http://localhost:3000",
 ):
     """Clean sensitive files and ensure required dirs exist in the dist."""
-    _step("Post-processing dist/PostureApp/")
+    _step("Post-processing dist/PostureCam/")
 
     if not DIST.exists():
         _fail(f"dist directory not found at {DIST}")
@@ -213,21 +223,30 @@ def _print_summary():
     print("  Output directory:")
     print(f"    {DIST}")
     print()
-    print("  -- Next step: Inno Setup -------------------------------------")
-    print("  1. Install Inno Setup 6  (https://jrsoftware.org/isinfo.php)")
-    print("  2. Open webcam_guardian_setup.iss in the Inno Setup IDE,")
-    print("     or compile from the command line:")
-    print()
-    iscc = r'  "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" webcam_guardian_setup.iss'
-    print(iscc)
-    print()
-    print("  The installer will be written to  dist/WebcamGuardianSetup.exe")
-    print()
+    if sys.platform == "win32":
+        print("  -- Next step: Inno Setup -------------------------------------")
+        print("  1. Install Inno Setup 6  (https://jrsoftware.org/isinfo.php)")
+        print("  2. Open posturecam_setup.iss in the Inno Setup IDE,")
+        print("     or compile from the command line:")
+        print()
+        iscc = r'  "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" posturecam_setup.iss'
+        print(iscc)
+        print()
+        print("  The installer will be written to  dist/PostureCamSetup.exe")
+        print()
+    elif sys.platform == "darwin":
+        print("  -- Next step: macOS Installer --------------------------------")
+        print("  Run build_release_installer_mac.sh to package into a DMG.")
+        print()
+    else:
+        print("  -- Next step: Linux Installer --------------------------------")
+        print("  Run build_release_installer_linux.sh to package into a tarball.")
+        print()
     print("  Demo mode options:")
     print('    - Build-time: python build_executable.py --demo')
     print('    - Build-time (dev alias): python build_executable.py --dev')
-    print('    - Runtime env: set POSTURE_DEMO_MODE=1 before launching PostureApp.exe')
-    print('    - Runtime env (dev alias): set POSTURE_DEV_MODE=1 before launching PostureApp.exe')
+    print('    - Runtime env: set POSTURE_DEMO_MODE=1 before launching PostureCam.exe')
+    print('    - Runtime env (dev alias): set POSTURE_DEV_MODE=1 before launching PostureCam.exe')
     print()
 
 
@@ -260,7 +279,7 @@ def main():
     args = parser.parse_args()
 
     print("\n\033[1;35m+------------------------------------------+")
-    print("|   Posture App - Windows Build Pipeline   |")
+    print("|   Posture App - Build Pipeline           |")
     print("+------------------------------------------+\033[0m")
 
     if not args.skip_icon:

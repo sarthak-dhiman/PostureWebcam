@@ -7,6 +7,8 @@ Every request runs off the main thread so the UI never freezes.
 import time
 import json
 import os
+import socket
+import ssl
 from datetime import datetime, timezone
 
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer, QObject
@@ -129,7 +131,7 @@ class LoginWorker(QThread):
             req = urllib.request.Request(API_LOGIN, data=payload, method="POST")
             req.add_header("Content-Type", "application/json")
             try:
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with urllib.request.urlopen(req, timeout=15) as resp:
                     if resp.status in (200, 201):
                         body = json.load(resp)
                         # Support both mock format ("token") and Django SimpleJWT
@@ -173,9 +175,19 @@ class LoginWorker(QThread):
                 except Exception:
                     msg = f"HTTP {e.code}: {e.reason}"
                 self.login_failed.emit(msg)
+            except (socket.timeout, TimeoutError):
+                self.login_failed.emit("The server is waking up. Please try again in a few seconds.")
+            except ssl.SSLError as e:
+                if "timed out" in str(e).lower():
+                    self.login_failed.emit("The server is waking up. Please try again in a few seconds.")
+                else:
+                    self.login_failed.emit(f"SSL error: {e}")
             except urllib.error.URLError as e:
                 # Genuine network failure (server down, DNS, timeout)
-                self.login_failed.emit("Cannot reach the server. Please check your connection.")
+                if isinstance(e.reason, socket.timeout):
+                    self.login_failed.emit("The server is waking up. Please try again in a few seconds.")
+                else:
+                    self.login_failed.emit("Cannot reach the server. Please check your connection.")
 
         except Exception as exc:
             self.login_failed.emit(f"Unexpected error: {exc}")
@@ -251,7 +263,7 @@ class SubscriptionMonitor(QThread):
         try:
             req = urllib.request.Request(API_VERIFY, method="GET")
             req.add_header("Authorization", f"Bearer {_stored_token}")
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 if resp.status == 200:
                     self.status_changed.emit("online", "Subscription active — verified online.")
                 else:
@@ -290,7 +302,7 @@ class OAuthInitWorker(QThread):
         import urllib.error
         try:
             req = urllib.request.Request(API_GOOGLE_OAUTH, method="GET")
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 body = json.load(resp)
                 url     = body.get("url")
                 session = body.get("session")
@@ -346,7 +358,7 @@ class OAuthPollWorker(QThread):
             while self._running and (time.time() - start) < self._timeout:
                 try:
                     url = f"{API_GOOGLE_POLL}?session={self._session}"
-                    with urllib.request.urlopen(url, timeout=5) as resp:
+                    with urllib.request.urlopen(url, timeout=15) as resp:
                         if resp.status == 200:
                             body = json.load(resp)
                             if body.get("status") == "done":
@@ -407,6 +419,7 @@ class PostureTrackerThread(QThread):
         self._spawn_daemon_enabled = spawn_daemon
         self._daemon_proc = None   # subprocess.Popen handle for tracker_daemon.py
         self._last_spawn_error: str = ""
+        self._last_daemon_exit_reported: int | None = None
         # live stats path (same location used by system_tray_widget)
         from pathlib import Path
         self._base = Path(__file__).resolve().parents[1]
@@ -552,6 +565,7 @@ class PostureTrackerThread(QThread):
                 pass
             self._daemon_proc = proc
             self._last_spawn_error = ""
+            self._last_daemon_exit_reported = None
             # Persist PID so it can be killed if the app exits unexpectedly
             try:
                 os.makedirs(os.path.dirname(_pid_file), exist_ok=True)
@@ -631,6 +645,19 @@ class PostureTrackerThread(QThread):
                 self.msleep(500)
                 continue
 
+            if self._daemon_proc is not None:
+                exit_code = self._daemon_proc.poll()
+                if exit_code is not None:
+                    if self._last_daemon_exit_reported != exit_code:
+                        self._last_daemon_exit_reported = exit_code
+                        self.status_changed.emit(
+                            "hold",
+                            f"Tracker stopped unexpectedly (daemon exit code {exit_code}).",
+                        )
+                    self._hold = True
+                    self._daemon_proc = None
+                    continue
+
             # Not on hold: try to read live stats file if present
             try:
                 if self._live_stats.exists():
@@ -661,6 +688,8 @@ class PostureTrackerThread(QThread):
                         "eye_elapsed_sec": data.get("eye_elapsed_sec", 0) or 0,
                         "bad_streak_sec":  bad_streak_sec,
                     }
+                    if "notification" in data:
+                        payload["notification"] = data["notification"]
                     self.posture_update.emit(payload)
                 else:
                     # no live stats yet — emit no_tracker
@@ -729,7 +758,7 @@ class OrgJoinWorker(QThread):
             # Strip any existing "Bearer " prefix so it is never doubled
             _bare = token[7:] if token.startswith("Bearer ") else token
             req.add_header("Authorization", f"Bearer {_bare}")
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 body = json.load(resp)
                 org_name = body.get("name") or body.get("org_id") or "Organisation"
                 self.join_success.emit(org_name)
@@ -782,7 +811,7 @@ class QuotaFetchWorker(QThread):
         try:
             req = urllib.request.Request(API_QUOTA, method="GET")
             req.add_header("Authorization", f"Bearer {self._token}")
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 body = json.load(resp)
                 remaining = int(body.get("quota_remaining_seconds", 0))
                 is_free   = bool(body.get("is_free_tier", False))
@@ -833,7 +862,7 @@ class QuotaLogWorker(QThread):
             req = urllib.request.Request(API_QUOTA_LOG, data=payload, method="POST")
             req.add_header("Content-Type", "application/json")
             req.add_header("Authorization", f"Bearer {self._token}")
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 body = json.load(resp)
                 remaining = int(body.get("quota_remaining_seconds", 0))
                 self.quota_updated.emit(remaining)

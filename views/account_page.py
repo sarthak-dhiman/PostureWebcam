@@ -14,7 +14,7 @@ from core.constants import C, BILLING_URL
 import json, os, sys
 
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "app_config.json")
-_STARTUP_KEY  = "PostureApp"
+_STARTUP_KEY  = "PostureCam"
 _STARTUP_HIVE = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 

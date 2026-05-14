@@ -58,40 +58,77 @@ def _encode_app_path(exe: str) -> str:
     return normed.replace(":", "").replace("\\", "#")
 
 
-def _rw_flags(write: bool = False) -> int:
-    base = winreg.KEY_WOW64_64KEY
+def _rw_flags(write: bool = False, use_64: bool = False) -> int:
+    """Build registry access flags.
+    
+    KEY_WOW64_64KEY is only valid for HKLM (where 32-bit and 64-bit views
+    are distinct). Using it on HKCU causes [WinError 5] Access is denied on
+    many Windows 10/11 configurations. Always pass use_64=False for HKCU.
+    """
+    base = winreg.KEY_WOW64_64KEY if use_64 else 0
     return base | (winreg.KEY_SET_VALUE if write else winreg.KEY_READ)
 
 
 def _get_value(hive, subkey: str) -> str | None:
-    try:
-        with winreg.OpenKey(hive, subkey, 0, _rw_flags()) as k:
-            val, _ = winreg.QueryValueEx(k, "Value")
-            return val
-    except FileNotFoundError:
-        return None
-    except Exception:
-        return None
+    # For HKCU never use KEY_WOW64_64KEY; for HKLM try 64-bit view first.
+    use_64_options = (False,) if hive == winreg.HKEY_CURRENT_USER else (True, False)
+    for use_64 in use_64_options:
+        try:
+            with winreg.OpenKey(hive, subkey, 0, _rw_flags(use_64=use_64)) as k:
+                val, _ = winreg.QueryValueEx(k, "Value")
+                return val
+        except FileNotFoundError:
+            return None
+        except Exception:
+            continue
+    return None
 
 
 def _set_value(hive, subkey: str, value: str = _ALLOW) -> None:
-    """Create key if needed and set its 'Value' string."""
-    with winreg.CreateKeyEx(hive, subkey, 0, _rw_flags(write=True)) as k:
-        winreg.SetValueEx(k, "Value", 0, winreg.REG_SZ, value)
-        # Also stamp LastUsedTimeStop=0 so Windows keeps the entry active
+    """Create key if needed and set its 'Value' string.
+    
+    For HKCU: always use plain access flags (no WOW64 redirect) — using
+    KEY_WOW64_64KEY on HKCU causes [WinError 5] Access is denied.
+    For HKLM: try KEY_WOW64_64KEY first (64-bit view), then plain.
+    """
+    # HKCU must never use KEY_WOW64_64KEY
+    use_64_options = (False,) if hive == winreg.HKEY_CURRENT_USER else (True, False)
+    last_exc = None
+    for use_64 in use_64_options:
         try:
-            winreg.SetValueEx(k, "LastUsedTimeStop", 0, winreg.REG_QWORD, 0)
-        except Exception:
-            pass
+            with winreg.CreateKeyEx(hive, subkey, 0, _rw_flags(write=True, use_64=use_64)) as k:
+                winreg.SetValueEx(k, "Value", 0, winreg.REG_SZ, value)
+                # Also stamp LastUsedTimeStop=0 so Windows keeps the entry active
+                try:
+                    winreg.SetValueEx(k, "LastUsedTimeStop", 0, winreg.REG_QWORD, 0)
+                except Exception:
+                    pass
+            return  # success
+        except PermissionError as exc:
+            last_exc = exc
+            continue
+        except Exception as exc:
+            raise
+    # All attempts failed — re-raise the last PermissionError
+    if last_exc:
+        raise last_exc
 
 
 # ─── Consent check ────────────────────────────────────────────────────────────
 
 def check_camera_allowed() -> bool:
-    """Return True when both HKCU and HKLM consent are Allow."""
+    """Return True when Windows grants webcam consent for this session.
+    
+    HKCU (user-level) Allow is sufficient for camera access — HKLM is the
+    system-wide default but is only strictly required when HKCU is missing.
+    Requiring both blocks legitimate setups where the user has HKCU=Allow but
+    HKLM is not set (common on non-admin accounts).
+    """
     hkcu = _get_value(winreg.HKEY_CURRENT_USER, _HKCU_WEBCAM)
+    if hkcu == _ALLOW:
+        return True
     hklm = _get_value(winreg.HKEY_LOCAL_MACHINE, _HKLM_WEBCAM)
-    return hkcu == _ALLOW and hklm == _ALLOW
+    return hklm == _ALLOW
 
 
 # ─── Apply all consent keys (must run as admin for HKLM) ─────────────────────
@@ -170,8 +207,9 @@ def ensure_camera_perms() -> bool:
     Ensure Windows grants camera access to this Python process.
 
     Strategy:
-      1. ALWAYS write the per-app HKCU entry for this Python exe
-         (no UAC required — this is the key Windows checks per-process).
+      1. ALWAYS write the per-app HKCU entry for this Python exe AND the
+         packaged executable (sys.executable differs in PyInstaller bundles).
+         No UAC required — this is the key Windows checks per-process.
       2. If global consent is already set, return True after step 1.
       3. Otherwise write full HKCU keys.
       4. If already admin → write HKLM keys directly.
@@ -179,23 +217,42 @@ def ensure_camera_perms() -> bool:
       5. Re-check and return final state.
 
     The per-app key is always written so that Windows recognises this
-    specific Python interpreter even after a reboot or Settings reset.
+    specific executable even after a reboot or Settings reset.
     """
     python_exe = sys.executable
     app_enc = _encode_app_path(python_exe)
 
+    # Also stamp the packaged .exe path when running from a PyInstaller bundle:
+    # sys.executable in a bundle points to the .exe itself, but
+    # sys._MEIPASS being present is the reliable indicator.
+    extra_exes = []
+    if getattr(sys, "frozen", False):
+        # Running inside a PyInstaller bundle — sys.executable IS the .exe
+        # so nothing extra is needed; app_enc already covers it.
+        pass
+    else:
+        # Running as a plain Python script — also try to register the .exe
+        # from sys._MEIPASS if it somehow exists.
+        mei = getattr(sys, "_MEIPASS", None)
+        if mei:
+            exe_candidate = os.path.join(os.path.dirname(mei), os.path.basename(python_exe))
+            if os.path.isfile(exe_candidate):
+                extra_exes.append(exe_candidate)
+
     # Step 1: unconditionally stamp the per-app HKCU entry (no UAC needed).
     # This is the key Windows checks at the process level — without it the
     # camera driver delivers black frames even when global consent = Allow.
-    for sub in (
-        _HKCU_WEBCAM,
-        _HKCU_WEBCAM + r"\NonPackaged",
-        _HKCU_WEBCAM + r"\NonPackaged" + "\\" + app_enc,
-    ):
-        try:
-            _set_value(winreg.HKEY_CURRENT_USER, sub)
-        except Exception as exc:
-            log.warning("[camera_perms] HKCU per-app stamp failed (%s): %s", sub, exc)
+    for exe_path in [python_exe] + extra_exes:
+        enc = _encode_app_path(exe_path)
+        for sub in (
+            _HKCU_WEBCAM,
+            _HKCU_WEBCAM + r"\NonPackaged",
+            _HKCU_WEBCAM + r"\NonPackaged" + "\\" + enc,
+        ):
+            try:
+                _set_value(winreg.HKEY_CURRENT_USER, sub)
+            except Exception as exc:
+                log.warning("[camera_perms] HKCU per-app stamp failed (%s): %s", sub, exc)
 
     if check_camera_allowed():
         log.info("[camera_perms] Camera permissions OK (per-app key ensured).")
